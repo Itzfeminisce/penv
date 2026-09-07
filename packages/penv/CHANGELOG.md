@@ -1,5 +1,11 @@
 # @penvhq/penv
 
+## 0.16.2
+
+### Patch Changes
+
+- @penvhq/core@0.16.2
+
 ## 0.16.1
 
 ### Patch Changes
