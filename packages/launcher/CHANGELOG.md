@@ -1,5 +1,13 @@
 # penv
 
+## 0.16.2
+
+### Patch Changes
+
+- Updated dependencies [2d1af8b]
+  - @penvhq/cli@0.16.2
+  - @penvhq/core@0.16.2
+
 ## 0.16.1
 
 ### Patch Changes
