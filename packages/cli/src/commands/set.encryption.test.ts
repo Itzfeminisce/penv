@@ -404,3 +404,84 @@ describe("the twin at the scope being written", () => {
     expect(valueFile(root, "db-password.development")).toBe("for-dev");
   });
 });
+
+/**
+ * `penv set <key>` with no value used to drain stdin unconditionally, which on a
+ * terminal is a silent wait for an end-of-file nobody was told to send. The
+ * command asks now, and what it asks with is decided here: meta says whether the
+ * typing is hidden, and a blank answer is a refusal rather than an empty file.
+ */
+describe("a value the command line did not carry", () => {
+  it("asks, says whether the parameter is a secret, and seals the answer", async () => {
+    process.env[KEY_VARIABLE] = freshKey();
+    const root = makeProject({ tree: { "db-password.json": SECRET } });
+    const prompts: Array<{ parameter: string; secret: boolean }> = [];
+
+    const result = await runSet({
+      cwd: root,
+      key: "db-password",
+      environment: "production",
+      ask: async (prompt) => {
+        prompts.push(prompt);
+        return "hunter2";
+      },
+    });
+
+    expect(prompts).toEqual([{ parameter: "db-password", secret: true }]);
+    expect(result.encrypted).toBe(true);
+    expect(valueFile(root, "db-password.production")).toBeUndefined();
+    expect(valueFile(root, "db-password.production.enc")).toBeDefined();
+  });
+
+  it("asks unhidden for a parameter meta does not call secret", async () => {
+    const root = makeProject({});
+    const prompts: Array<{ parameter: string; secret: boolean }> = [];
+
+    await runSet({
+      cwd: root,
+      key: "db-password",
+      environment: "development",
+      ask: async (prompt) => {
+        prompts.push(prompt);
+        return "plain";
+      },
+    });
+
+    expect(prompts).toEqual([{ parameter: "db-password", secret: false }]);
+    expect(valueFile(root, "db-password.development")).toBe("plain");
+  });
+
+  it("refuses a blank answer and writes nothing", async () => {
+    const root = makeProject({});
+
+    const code = await refusalOf(
+      runSet({ cwd: root, key: "db-password", environment: "development", ask: async () => "" }),
+    );
+
+    expect(code).toBe("VALUE_MISSING");
+    expect(valueFile(root, "db-password.development")).toBeUndefined();
+  });
+
+  it("refuses the end of input the same way", async () => {
+    const root = makeProject({});
+
+    const code = await refusalOf(
+      runSet({
+        cwd: root,
+        key: "db-password",
+        environment: "development",
+        ask: async () => undefined,
+      }),
+    );
+
+    expect(code).toBe("VALUE_MISSING");
+  });
+
+  it("refuses when there is neither a value nor a way to ask", async () => {
+    const root = makeProject({});
+
+    const code = await refusalOf(runSet({ cwd: root, key: "db-password" }));
+
+    expect(code).toBe("VALUE_MISSING");
+  });
+});

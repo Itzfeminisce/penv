@@ -20,10 +20,12 @@
  * user who never heard the question never chose it.
  */
 
-import { PenvError, recordPath, SCHEMA_SHAPE_FILE } from "@penvhq/core";
+import type { ParameterRef } from "@penvhq/core";
+import { isSecret, PenvError, recordPath, SCHEMA_SHAPE_FILE } from "@penvhq/core";
 import { defineCommand } from "citty";
 import { shorthandCandidates } from "../env-flags.js";
 import { lineReader } from "../input.js";
+import { openProject, type Project } from "../project.js";
 import { out } from "../style.js";
 import { CHECK, formatRows, guard, prompt as promptLine, type Row, WARN, write } from "../ui.js";
 import { runSet } from "./set.js";
@@ -45,10 +47,7 @@ export interface FillPrompt {
   /** The value file's key, kebab and slash-separated — the name the user need never derive. */
   readonly parameter: string;
   readonly environment: string;
-  /**
-   * Whether meta says this is a secret. Carried so a wrapper can mute the echo;
-   * v1 does not, and the drift carries no meta, so this is `false` today.
-   */
+  /** Whether meta says this is a secret, so the wrapper mutes the echo. */
   readonly secret: boolean;
   /**
    * Whether the schema excuses absence — `.optional()`, `.default()`. An answer
@@ -140,6 +139,10 @@ export async function runFill(options: FillOptions): Promise<FillResult> {
     );
   }
 
+  const project = openProject(options.cwd);
+  const secretFor = async (ref: ParameterRef): Promise<boolean> =>
+    isSecret(await project.provider.readMeta(ref), environment);
+
   const written: Array<{ parameter: string; location: string; encrypted: boolean }> = [];
   const skipped: string[] = [];
   const kept: string[] = [];
@@ -156,12 +159,10 @@ export async function runFill(options: FillOptions): Promise<FillResult> {
 
     const ref = drift.ref;
     const key = [...ref.namespace, ref.name].join("/");
-    // `secret` stays false: the drift carries no meta, and echo-muting is not a
-    // v1 feature. The write below still seals per meta — `runSet` reads it there.
     const value = await options.ask({
       parameter: key,
       environment,
-      secret: false,
+      secret: await secretFor(ref),
       optional: false,
     });
     if (value === undefined || value === "") {
@@ -193,7 +194,7 @@ export async function runFill(options: FillOptions): Promise<FillResult> {
     const value = await options.ask({
       parameter: key,
       environment,
-      secret: false,
+      secret: await secretFor(ref),
       optional: true,
       ...(item.defaultValue === undefined ? {} : { defaultValue: item.defaultValue }),
     });
@@ -288,12 +289,11 @@ export const fillCommand = defineCommand({
   run({ args }) {
     return guard(async () => {
       const reader = lineReader();
-      // TODO: a `prompt.secret` answer still echoes — echo-muting is out of scope
-      // for v1. The prompt shows the derived key, so a reader sees the file name
-      // their answer becomes. An empty answer skips — the prompt's aside says so,
+      // The prompt shows the derived key, so a reader sees the file name their
+      // answer becomes. An empty answer skips — the prompt's aside says so,
       // because the skip is a feature and an undiscoverable feature is not one.
       const ask = (prompt: FillPrompt): Promise<string | undefined> =>
-        reader.ask(promptLine(prompt.parameter, contextFor(prompt)));
+        reader.ask(promptLine(prompt.parameter, contextFor(prompt)), { secret: prompt.secret });
       try {
         write(
           renderFill(

@@ -99,4 +99,40 @@ describe("lineReader", () => {
     await expect(reader.ask("two > ")).resolves.toBe("after");
     reader.close();
   });
+
+  it("writes the question but not the typing for a secret, then a newline", async () => {
+    const { input, output, written } = makeStreams();
+    // A terminal, so readline echoes keystrokes — the thing muting must stop.
+    Object.assign(output, { isTTY: true, columns: 80 });
+    const reader = lineReader(input, output);
+
+    const answer = reader.ask("secret > ", { secret: true });
+    await tick();
+    expect(written()).toContain("secret > ");
+
+    input.write("hunter2\r");
+    await expect(answer).resolves.toBe("hunter2");
+    expect(written()).not.toContain("hunter2");
+    expect(written().endsWith("\n")).toBe(true);
+    reader.close();
+  });
+
+  it("echoes again for the question after a secret", async () => {
+    const { input, output, written } = makeStreams();
+    Object.assign(output, { isTTY: true, columns: 80 });
+    const reader = lineReader(input, output);
+
+    const first = reader.ask("secret > ", { secret: true });
+    await tick();
+    input.write("hidden\r");
+    await first;
+
+    const second = reader.ask("plain > ");
+    await tick();
+    input.write("shown\r");
+    await expect(second).resolves.toBe("shown");
+    expect(written()).not.toContain("hidden");
+    expect(written()).toContain("shown");
+    reader.close();
+  });
 });

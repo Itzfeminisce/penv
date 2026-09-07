@@ -19,6 +19,7 @@ import {
   sealValue,
 } from "@penvhq/core";
 import { defineCommand } from "citty";
+import { lineReader } from "../input.js";
 import type { Project } from "../project.js";
 import {
   assertWritableKey,
@@ -27,7 +28,7 @@ import {
   refFromKey,
   targetEnvironment,
 } from "../project.js";
-import { CHECK, formatRows, guard, write } from "../ui.js";
+import { CHECK, formatRows, guard, prompt, write } from "../ui.js";
 
 export interface ScopeOptions {
   /** The environment scope. Combined with `local`, the environment-scoped override. */
@@ -35,10 +36,23 @@ export interface ScopeOptions {
   readonly local?: boolean;
 }
 
+/** What `set` knows when it has to ask for the value: which file, and whether to hide the typing. */
+export interface SetPrompt {
+  readonly parameter: string;
+  /** Whether meta says this is a secret, so the wrapper mutes the echo. */
+  readonly secret: boolean;
+}
+
 export interface SetOptions extends ScopeOptions {
   readonly cwd: string;
   readonly key: string;
-  readonly value: string;
+  /** The value, when the command line carried one. */
+  readonly value?: string;
+  /**
+   * How the value is obtained when the command line carried none. `undefined`
+   * or an empty answer is a refusal: an empty secret is never what was meant.
+   */
+  readonly ask?: (prompt: SetPrompt) => Promise<string | undefined>;
 }
 
 export interface SetResult {
@@ -243,17 +257,47 @@ export async function runSet(options: SetOptions): Promise<SetResult> {
   // the environment is a filename segment too.
   const scope = targetScope(project, options, options.key);
   const environment = policyEnvironment(project, options);
+  const value = options.value ?? (await askForValue(project, ref, environment, options));
 
   const { encrypted, location } = await sealAwareWrite({
     project,
     provider: project.provider,
     ref,
     scope,
-    value: options.value,
+    value,
     environment,
   });
 
   return { parameter: options.key, location, encrypted };
+}
+
+/**
+ * The value from the caller's `ask`, or a refusal that names what was missing.
+ *
+ * Meta is read before the question so a secret is typed unseen. A blank answer
+ * refuses rather than writing an empty file: `set` is the only writer, and an
+ * empty secret written by a slipped Enter would win the cascade over any value
+ * already there.
+ */
+async function askForValue(
+  project: Project,
+  ref: ParameterRef,
+  environment: string | undefined,
+  options: SetOptions,
+): Promise<string> {
+  const parameter = parameterId(ref);
+  const remedy =
+    `Pass it on the command line — \`penv set ${options.key} <value>\` — pipe it in, ` +
+    "or answer the prompt.";
+  if (options.ask === undefined) {
+    throw new PenvError("VALUE_MISSING", `No value was given for parameter ${parameter}`, remedy);
+  }
+  const secret = isSecret(await project.provider.readMeta(ref), environment);
+  const answer = await options.ask({ parameter, secret });
+  if (answer === undefined || answer.length === 0) {
+    throw new PenvError("VALUE_MISSING", `No value was entered for parameter ${parameter}`, remedy);
+  }
+  return answer;
 }
 
 export function renderSet(result: SetResult): string[] {
@@ -269,7 +313,11 @@ export function renderSet(result: SetResult): string[] {
   ]);
 }
 
-/** The value when it is piped in rather than typed: one trailing newline is the shell's. */
+/**
+ * The value when it is piped in rather than typed: one trailing newline is the
+ * shell's. Only for a pipe — against a terminal this waits for an end-of-file
+ * nobody was told to send, which is why a terminal is asked instead.
+ */
 export async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin as AsyncIterable<Buffer>) {
@@ -296,18 +344,32 @@ export const setCommand = defineCommand({
   },
   run({ args }) {
     return guard(async () => {
-      const value = args.value ?? (await readStdin());
-      write(
-        renderSet(
-          await runSet({
-            cwd: process.cwd(),
-            key: args.key,
-            value,
-            ...(args.env === undefined ? {} : { environment: args.env }),
-            ...(args.local === undefined ? {} : { local: args.local }),
-          }),
-        ),
-      );
+      const base = {
+        cwd: process.cwd(),
+        key: args.key,
+        ...(args.env === undefined ? {} : { environment: args.env }),
+        ...(args.local === undefined ? {} : { local: args.local }),
+      };
+      // The command line, then a pipe, then a person: a terminal is asked rather
+      // than drained, because a drain waits for an end-of-file nobody was told to send.
+      if (args.value !== undefined) {
+        write(renderSet(await runSet({ ...base, value: args.value })));
+        return;
+      }
+      if (process.stdin.isTTY !== true) {
+        write(renderSet(await runSet({ ...base, value: await readStdin() })));
+        return;
+      }
+      const reader = lineReader();
+      try {
+        const ask = ({ parameter, secret }: SetPrompt): Promise<string | undefined> =>
+          reader.ask(prompt(parameter, secret ? "secret, typing is hidden" : undefined), {
+            secret,
+          });
+        write(renderSet(await runSet({ ...base, ask })));
+      } finally {
+        reader.close();
+      }
     });
   },
 });
