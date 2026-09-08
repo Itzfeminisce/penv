@@ -1,4 +1,4 @@
-<h1 align="center">penv</h1>
+<h1 align="center">Penv CLI (Official CLI of the penv.cloud platform)</h1>
 
 <p align="center">
   <strong>Your <code>.env</code>, validated, typed, and kept out of your coding agent's reach.</strong><br>
