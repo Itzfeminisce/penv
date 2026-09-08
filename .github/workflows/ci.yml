@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, v1-rust]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -11,27 +11,16 @@ concurrency:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
-      # Node must be >=22.13 BEFORE pnpm runs — pnpm 11.3 imports node:sqlite.
-      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: 22
-
-      - uses: pnpm/action-setup@v4
-
-      # Re-run setup-node now that pnpm is on PATH, to enable the pnpm cache.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - run: pnpm install --frozen-lockfile
-      # Build first: some tests load a scaffolded penv.config.ts that imports the
-      # built @penvhq/penv by name, so dist/ must exist before the suite runs.
-      - run: pnpm build
-      - run: pnpm typecheck
-      - run: pnpm test
-      - run: pnpm lint
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo test --workspace

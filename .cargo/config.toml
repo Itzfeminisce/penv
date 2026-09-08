@@ -1,0 +1,6 @@
+[build]
+# 4-core machine; release builds happen in CI only
+jobs = 2
+
+[profile.dev]
+debug = 1
