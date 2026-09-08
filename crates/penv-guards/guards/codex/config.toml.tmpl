@@ -1,0 +1,6 @@
+[sandbox_workspace_write]
+deny_read = [{% for file in env_files %}{{ ("**/" ~ file) | quote }}{% if not loop.last %}, {% endif %}{% endfor %}]
+
+[shell_environment_policy]
+inherit = "core"
+ignore_default_excludes = false

@@ -12,6 +12,8 @@ pub struct Report {
     pub json: Value,
     pub text: String,
     pub exit: Exit,
+    /// The command wrote whatever the caller needs itself.
+    pub silent: bool,
 }
 
 impl Report {
@@ -20,6 +22,16 @@ impl Report {
             json,
             text: text.into(),
             exit: Exit::Ok,
+            silent: false,
+        }
+    }
+
+    pub fn silent() -> Report {
+        Report {
+            json: Value::Null,
+            text: String::new(),
+            exit: Exit::Ok,
+            silent: true,
         }
     }
 
@@ -98,7 +110,9 @@ impl Output {
     }
 
     pub fn write(&self, report: &Report, to: &mut impl Write) -> std::io::Result<()> {
-        if self.render.json {
+        if report.silent {
+            Ok(())
+        } else if self.render.json {
             writeln!(to, "{}", serde_json::to_string_pretty(&report.json)?)
         } else if report.text.is_empty() {
             Ok(())

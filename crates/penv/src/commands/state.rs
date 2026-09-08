@@ -1,13 +1,17 @@
+use std::io::IsTerminal;
 use std::path::Path;
 
-use serde_json::json;
+use penv_agent::{Detection, Policy};
+use serde_json::{Value, json};
 
+use crate::agent::detect_here;
+use crate::env::Env;
 use crate::error::CliError;
 use crate::files::{ENV_FILE, SCHEMA_FILE, find_schema, read_file, show};
 use crate::output::{Output, Report};
 
 /// The state, and the one command that follows from it.
-pub fn run(out: &Output, cwd: &Path) -> Result<Report, CliError> {
+pub fn run(out: &Output, cwd: &Path, env: &Env) -> Result<Report, CliError> {
     let schema_path = find_schema(cwd);
     let has_env = cwd.join(ENV_FILE).is_file();
 
@@ -53,6 +57,9 @@ pub fn run(out: &Output, cwd: &Path) -> Result<Report, CliError> {
         }
     };
 
+    let detection = detect_here(env, std::io::stdout().is_terminal());
+    let policy = Policy::for_(&detection, false);
+
     let style = out.style();
     let mut text = format!(
         "{}   {}\n{}    {}",
@@ -61,6 +68,16 @@ pub fn run(out: &Output, cwd: &Path) -> Result<Report, CliError> {
         style.dim("next"),
         next
     );
+    if let Some(name) = detection.name() {
+        text.push_str(&format!(
+            "\n{}   {} ({})\n{}  {}",
+            style.dim("agent"),
+            style.bold(name),
+            detection.confidence.as_str(),
+            style.dim("policy"),
+            describe(&policy),
+        ));
+    }
     text.push('\n');
     text.push_str(&style.dim(&note));
 
@@ -71,7 +88,53 @@ pub fn run(out: &Output, cwd: &Path) -> Result<Report, CliError> {
             "project": project,
             "next": next,
             "note": note,
+            "agent": agent_json(&detection),
+            "policy": {
+                "json": policy.json,
+                "mask": policy.mask,
+                "revealAllowed": policy.reveal_allowed,
+                "pullAllowed": policy.pull_allowed,
+                "credentialTtlSecs": policy.credential_ttl_secs,
+            },
         }),
         text,
     ))
+}
+
+fn agent_json(detection: &Detection) -> Value {
+    match &detection.agent {
+        None => Value::Null,
+        Some(agent) => json!({
+            "name": agent.name,
+            "version": agent.version,
+            "mode": agent.mode,
+            "confidence": detection.confidence.as_str(),
+            "session": detection.session_id,
+            "markers": detection.markers,
+        }),
+    }
+}
+
+/// The policy in force, in the order it bites.
+fn describe(policy: &Policy) -> String {
+    let mut parts = Vec::new();
+    parts.push(if policy.mask {
+        "output masked"
+    } else {
+        "output unmasked"
+    });
+    if policy.json {
+        parts.push("json");
+    }
+    if !policy.reveal_allowed {
+        parts.push("reveal refused");
+    }
+    if !policy.pull_allowed {
+        parts.push("pull refused");
+    }
+    format!(
+        "{}, credentials {}s",
+        parts.join(", "),
+        policy.credential_ttl_secs
+    )
 }

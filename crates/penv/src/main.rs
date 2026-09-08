@@ -18,7 +18,7 @@ fn main() {
     ));
 
     let cwd = std::env::current_dir().unwrap_or_default();
-    let exit = match commands::dispatch(&cli, &out, &cwd) {
+    let exit = match commands::dispatch(&cli, &out, &cwd, &env) {
         Ok(report) => {
             let _ = out.write(&report, &mut std::io::stdout());
             report.exit

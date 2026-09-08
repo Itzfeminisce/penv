@@ -94,8 +94,11 @@ pub enum Command {
 
     /// Write the typed file for a language target
     Gen {
-        /// The target name, such as ts or py
-        target: String,
+        /// The target name, such as ts or py; omit it to list the targets
+        target: Option<String>,
+        /// Write somewhere other than the path the target names
+        #[arg(long, value_name = "PATH")]
+        out: Option<std::path::PathBuf>,
         /// Compare with what is on disk instead of writing
         #[arg(long)]
         check: bool,
@@ -103,6 +106,11 @@ pub enum Command {
 
     /// Write the harness rules that keep agents out of .env
     Guard {
+        /// The harnesses to write, instead of the installed ones
+        harness: Vec<String>,
+        /// Write every harness penv knows, installed or not
+        #[arg(long)]
+        all: bool,
         /// Report coverage instead of writing
         #[arg(long)]
         check: bool,

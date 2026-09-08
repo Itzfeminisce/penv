@@ -1,0 +1,13 @@
+name = "py"
+output = "penv_env.py"
+detect = ["pyproject.toml", "requirements.txt"]
+
+[types]
+string = "str"
+number = "float"
+integer = "int"
+boolean = "bool"
+url = "HttpUrl"
+email = "str"
+port = "int"
+enum = "'Literal[' ~ (values | map('quote') | join(', ')) ~ ']'"

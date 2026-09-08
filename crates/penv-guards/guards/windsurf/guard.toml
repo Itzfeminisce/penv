@@ -1,0 +1,12 @@
+name = "windsurf"
+description = "Windsurf hooks for running a command and for reading code, both the penv binary."
+scope = "project"
+detect = ["~/.windsurf", ".windsurf"]
+exe = ["windsurf"]
+
+[[write]]
+path = ".windsurf/hooks.json"
+format = "json"
+merge = "deny-union"
+union = ["pre_run_command", "pre_read_code"]
+template = "hooks.json.tmpl"

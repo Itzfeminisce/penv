@@ -1,0 +1,20 @@
+name = "claude-code"
+description = "Deny rules and a sandbox block for Claude Code, plus a PreToolUse hook that is the penv binary itself."
+scope = "project"
+detect = [".claude", "~/.claude"]
+exe = ["claude"]
+
+[[write]]
+path = ".claude/settings.json"
+format = "json"
+merge = "deny-union"
+union = ["deny", "denyRead", "PreToolUse", "hooks"]
+template = "settings.json.tmpl"
+
+[[write]]
+path = "~/.claude/settings.json"
+scope = "user"
+format = "json"
+merge = "deny-union"
+union = ["envVars", "injectHosts"]
+template = "user-settings.json.tmpl"

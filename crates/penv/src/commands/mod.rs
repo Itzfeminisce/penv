@@ -1,23 +1,52 @@
 mod check;
+mod r#gen;
+pub mod guard;
+pub mod hook;
 mod init;
 mod ls;
+mod run;
 mod state;
 
 use std::path::Path;
 
 use crate::cli::{Cli, Command, MachineCommand};
+use crate::env::Env;
 use crate::error::CliError;
 use crate::files::{SCHEMA_FILE, find_schema, read_file};
 use crate::manifest::manifest;
 use crate::output::{Output, Report};
 use penv_schema::Schema;
 
-pub fn dispatch(cli: &Cli, out: &Output, cwd: &Path) -> Result<Report, CliError> {
+pub fn dispatch(cli: &Cli, out: &Output, cwd: &Path, env: &Env) -> Result<Report, CliError> {
     match &cli.command {
-        None => state::run(out, cwd),
+        None => state::run(out, cwd, env),
         Some(Command::Init { force }) => init::run(out, cwd, *force),
+        Some(Command::Run {
+            env: environment,
+            no_mask,
+            command,
+        }) => run::run(
+            out,
+            cwd,
+            environment.as_deref(),
+            *no_mask,
+            command,
+            env,
+            cli.agent,
+        ),
         Some(Command::Check { key }) => check::run(out, cwd, key.as_deref()),
         Some(Command::Ls) => ls::run(out, cwd),
+        Some(Command::Gen {
+            target,
+            out: to,
+            check,
+        }) => r#gen::run(out, cwd, target.as_deref(), to.as_deref(), *check),
+        Some(Command::Guard {
+            harness,
+            all,
+            check,
+        }) => guard::run(out, cwd, *check, *all, harness),
+        Some(Command::Hook { harness }) => hook::run(harness),
         Some(Command::Schema) => schema(cwd),
         Some(Command::Help { command }) => help(command.as_deref()),
         Some(other) => Err(CliError::not_in_this_build(&path_of(other))),

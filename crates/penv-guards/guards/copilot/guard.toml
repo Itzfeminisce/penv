@@ -1,0 +1,11 @@
+name = "copilot"
+description = "Copilot CLI read denials for env files. The shape of this config is unverified against a published schema; treat it as best effort until Copilot documents one."
+scope = "project"
+detect = ["~/.copilot", ".github/copilot"]
+exe = ["copilot"]
+
+[[write]]
+path = ".github/copilot/permissions-config.json"
+format = "json"
+merge = "deny-union"
+template = "permissions-config.json.tmpl"

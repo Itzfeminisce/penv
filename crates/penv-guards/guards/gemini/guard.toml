@@ -1,0 +1,12 @@
+name = "gemini"
+description = "A Gemini CLI PreToolUse hook that is the penv binary itself."
+scope = "project"
+detect = ["~/.gemini", ".gemini"]
+exe = ["gemini"]
+
+[[write]]
+path = ".gemini/settings.json"
+format = "json"
+merge = "deny-union"
+union = ["PreToolUse", "hooks"]
+template = "settings.json.tmpl"

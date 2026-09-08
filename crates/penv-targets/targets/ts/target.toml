@@ -1,0 +1,13 @@
+name = "ts"
+output = "src/env.ts"
+detect = ["package.json", "tsconfig.json"]
+
+[types]
+string = "string"
+number = "number"
+integer = "number"
+boolean = "boolean"
+url = "string"
+email = "string"
+port = "number"
+enum = "values | map('quote') | join(' | ')"

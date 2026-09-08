@@ -1,0 +1,8 @@
+{
+  "sandbox": {
+    "credentials": {
+      "envVars": [{% for key in keys if key.sensitive %}{ "name": {{ key.name | quote }}, "mode": "mask" }{% if not loop.last %}, {% endif %}{% endfor %}],
+      "injectHosts": []
+    }
+  }
+}

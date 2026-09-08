@@ -1,0 +1,11 @@
+name = "codex"
+description = "A Codex workspace profile that refuses to read env files, and a shell policy that does not hand the child the parent's environment."
+scope = "project"
+detect = ["~/.codex", ".codex"]
+exe = ["codex"]
+
+[[write]]
+path = ".codex/config.toml"
+format = "toml"
+merge = "append-unique"
+template = "config.toml.tmpl"

@@ -44,6 +44,7 @@ const META: &[Meta] = &[
     },
     Meta {
         path: "run",
+        implemented: true,
         exit_codes: &[0, 1, 3, 5, 6],
         human_flags: &["no-mask"],
         env_flags: &[("env", "PENV_ENV")],
@@ -98,11 +99,14 @@ const META: &[Meta] = &[
     },
     Meta {
         path: "gen",
+        implemented: true,
         exit_codes: &[0, 1, 3],
         ..DEFAULT_META
     },
     Meta {
         path: "guard",
+        implemented: true,
+        exit_codes: &[0, 1, 3],
         ..DEFAULT_META
     },
     Meta {
@@ -133,6 +137,8 @@ const META: &[Meta] = &[
     },
     Meta {
         path: "hook",
+        implemented: true,
+        exit_codes: &[0, 2],
         ..DEFAULT_META
     },
     Meta {

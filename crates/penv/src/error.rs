@@ -68,7 +68,7 @@ impl CliError {
         CliError::new(
             "not_implemented",
             format!("penv {command} is not yet in this build."),
-            "This build is local mode only: init, check, ls, schema and help --json.",
+            "This build is local mode only: init, run, check, ls, gen, guard, schema and help --json.",
         )
     }
 }

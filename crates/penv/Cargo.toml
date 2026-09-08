@@ -15,6 +15,10 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+penv-agent.workspace = true
 penv-dotenv.workspace = true
+penv-guards.workspace = true
+penv-mask.workspace = true
 penv-schema.workspace = true
+penv-targets.workspace = true
 serde_json.workspace = true

@@ -44,6 +44,9 @@ pub fn run(out: &Output, cwd: &Path, force: bool) -> Result<Report, CliError> {
         write_file(&ignore_path, &update.content)?;
     }
 
+    let guarded = super::guard::auto(cwd, &schema.to_json());
+    let generated = super::r#gen::auto(cwd, &schema);
+
     let rows: Vec<Vec<String>> = schema
         .keys
         .iter()
@@ -74,6 +77,18 @@ pub fn run(out: &Output, cwd: &Path, force: bool) -> Result<Report, CliError> {
             show(&ignore_path)
         )));
     }
+    if !generated.is_empty() {
+        lines.push(style.dim(&format!(
+            "generated {}",
+            generated.iter().map(|p| show(p)).collect::<Vec<_>>().join(", ")
+        )));
+    }
+    if !guarded.is_empty() {
+        lines.push(style.dim(&format!(
+            "guarded {}",
+            guarded.iter().map(|p| show(p)).collect::<Vec<_>>().join(", ")
+        )));
+    }
     if !env.warnings.is_empty() {
         lines.push(style.dim(&format!(
             "{} line(s) in {ENV_FILE} sit outside the safe subset; penv check names them",
@@ -95,6 +110,8 @@ pub fn run(out: &Output, cwd: &Path, force: bool) -> Result<Report, CliError> {
                 "path": show(&ignore_path),
                 "added": update.added,
             },
+            "generated": generated.iter().map(|p| show(p)).collect::<Vec<_>>(),
+            "guarded": guarded.iter().map(|p| show(p)).collect::<Vec<_>>(),
             "warnings": env.warnings.iter().map(|w| json!({
                 "line": w.line,
                 "code": w.code,

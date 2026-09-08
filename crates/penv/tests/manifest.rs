@@ -93,7 +93,12 @@ fn this_build_implements_local_mode_only() {
         .filter(|c| c["implemented"] == true)
         .map(|c| c["path"].as_str().unwrap())
         .collect();
-    assert_eq!(implemented, ["init", "ls", "check", "schema", "help"]);
+    assert_eq!(
+        implemented,
+        [
+            "init", "run", "ls", "check", "gen", "guard", "hook", "schema", "help"
+        ]
+    );
 }
 
 #[test]
@@ -133,6 +138,33 @@ fn the_policy_flags_say_what_the_design_says() {
             .unwrap()["human"],
         true
     );
+}
+
+#[test]
+fn the_run_row_says_what_run_does() {
+    let manifest = manifest();
+    let run = find(&manifest, "run");
+
+    assert_eq!(run["implemented"], true);
+    assert_eq!(run["revealsValues"], false, "run never prints a value");
+    assert_eq!(run["requiresApproval"], false);
+    assert_eq!(run["exitCodes"], serde_json::json!([0, 1, 3, 5, 6]));
+
+    let command = run["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "command")
+        .expect("run takes a command");
+    assert_eq!(command["variadic"], true);
+
+    let flags: Vec<&str> = run["flags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(flags, ["env", "no-mask"]);
 }
 
 #[test]

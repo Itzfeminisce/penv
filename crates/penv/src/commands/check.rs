@@ -107,7 +107,7 @@ pub fn run(out: &Output, cwd: &Path, only: Option<&str>) -> Result<Report, CliEr
     })
 }
 
-fn body(
+pub(super) fn body(
     schema_path: &Path,
     env_path: Option<String>,
     diagnostics: &[Diagnostic],

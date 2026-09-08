@@ -1,0 +1,11 @@
+name = "cline"
+description = "A Cline PreToolUse hook script whose only line execs the penv binary."
+scope = "project"
+detect = [".clinerules", "~/.cline"]
+exe = []
+
+[[write]]
+path = ".clinerules/hooks/PreToolUse"
+format = "text"
+merge = "append-unique"
+template = "PreToolUse.tmpl"

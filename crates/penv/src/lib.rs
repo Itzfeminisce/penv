@@ -2,6 +2,9 @@
 //! contract and the exit codes. I/O lives here; the parsing and validation it
 //! calls are pure.
 
+pub mod agent;
+pub mod ancestry;
+pub mod claim;
 pub mod cli;
 pub mod commands;
 pub mod env;

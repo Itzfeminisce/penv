@@ -19,4 +19,8 @@ impl Env {
     pub fn get(&self, key: &str) -> Option<&str> {
         self.0.get(key).map(String::as_str)
     }
+
+    pub fn as_map(&self) -> &BTreeMap<String, String> {
+        &self.0
+    }
 }

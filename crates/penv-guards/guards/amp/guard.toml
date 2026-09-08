@@ -1,0 +1,11 @@
+name = "amp"
+description = "An empty Amp guarded-files allowlist, so no file is exempt from the guard."
+scope = "project"
+detect = ["~/.amp", ".amp"]
+exe = ["amp"]
+
+[[write]]
+path = ".amp/settings.json"
+format = "json"
+merge = "replace-if-absent"
+template = "settings.json.tmpl"
