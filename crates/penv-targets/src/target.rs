@@ -29,7 +29,7 @@ pub struct Check {
     pub files: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Target {
     pub name: String,
     /// Where `gen` writes, relative to the directory holding `.env.schema`.
@@ -39,6 +39,9 @@ pub struct Target {
     /// Schema base type name to a language type. The `enum` entry is a
     /// minijinja expression over `values`.
     pub types: BTreeMap<String, String>,
+    /// Whatever `[options]` holds, reaching the template as `options`. The
+    /// folder names its own knobs; no entry has meaning in Rust.
+    pub options: toml::Table,
     pub check: Option<Check>,
     pub template: String,
     pub source: Source,
@@ -54,6 +57,8 @@ struct File {
     detect: Vec<String>,
     #[serde(default)]
     types: BTreeMap<String, String>,
+    #[serde(default)]
+    options: toml::Table,
     #[serde(default)]
     check: Option<Check>,
 }
@@ -103,6 +108,7 @@ pub fn parse(
         output: file.output,
         detect: file.detect,
         types: file.types,
+        options: file.options,
         check: file.check,
         template: template.to_string(),
         source,
@@ -200,6 +206,19 @@ enum = "values | join(' | ')"
         let check = target.check.unwrap();
         assert_eq!(check.command, ["tsc", "{file}"]);
         assert_eq!(check.probe, ["tsc", "--version"]);
+    }
+
+    #[test]
+    fn the_options_table_is_whatever_the_folder_puts_there() {
+        let target = parse(
+            "ts",
+            &config("name = \"ts\"\noutput = \"src/env.ts\"\n[options]\nkey_case = \"camel\"\n"),
+            "",
+            Source::Repo,
+            ".penv/targets/ts",
+        )
+        .unwrap();
+        assert_eq!(target.options["key_case"].as_str(), Some("camel"));
     }
 
     #[test]

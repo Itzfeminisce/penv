@@ -2,6 +2,10 @@ name = "ts"
 output = "src/env.ts"
 detect = ["package.json", "tsconfig.json"]
 
+[options]
+# Property names in the exported object: the environment key, or its camel form.
+key_case = "upper"
+
 [types]
 string = "string"
 number = "number"

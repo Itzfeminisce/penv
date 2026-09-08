@@ -70,6 +70,23 @@ fn the_py_target_renders_its_snapshot() {
     assert_same("py.penv_env.py", PY, &rendered("py"));
 }
 
+/// `key_case` is the folder's own option, so a repo-local ts target can flip it.
+#[test]
+fn the_ts_target_renames_its_properties_when_key_case_is_camel() {
+    let mut target = built_in("ts");
+    target
+        .options
+        .insert("key_case".into(), toml::Value::String("camel".into()));
+    let schema = penv_schema::parse(FIXTURE).expect("the fixture parses");
+    let out = render(&target, &schema.to_json(), VERSION).expect("the fixture renders");
+    assert!(out.contains(
+        "  nextPublicAppUrl: (process.env.NEXT_PUBLIC_APP_URL ?? \"http://localhost:3000\") as string,"
+    ));
+    assert!(out.contains("seen[\"databaseUrl\"]"));
+    assert!(out.contains("path: [\"databaseUrl\"]"));
+    assert!(out.contains("message: \"DATABASE_URL is required\""));
+}
+
 #[test]
 fn a_constraint_never_reaches_the_generated_file() {
     for snapshot in [TS, PY] {

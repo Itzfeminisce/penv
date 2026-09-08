@@ -126,11 +126,11 @@ The hook binary is `penv` itself (`penv hook claude-code`), never a script needi
 ## 7. Language targets
 
 ```text
-targets/<name>/target.toml   name, output path, detect files, [types] map
+targets/<name>/target.toml   name, output path, detect files, [types] map, [options] table
 targets/<name>/env.tmpl      minijinja template over the schema JSON
 ```
 
-Lookup order: `.penv/targets/<name>/` in the repo, `~/.penv/targets/<name>/`, built in (ts, py). Same layout in all three. Targets receive `penv schema --json` and nothing else: no values, no network. One fixture schema is snapshot-rendered through every target in CI; `gen --check` compiles the output when the toolchain is present.
+Lookup order: `.penv/targets/<name>/` in the repo, `~/.penv/targets/<name>/`, built in (ts, py). Same layout in all three. Targets receive `penv schema --json` and nothing else: no values, no network. Whatever `[options]` holds reaches the template as `options`, unread by Rust, so a folder names its own knobs; `ts` takes `key_case = "upper" | "camel"` for the property names it exports, and a key with a default in the schema reads through it (`process.env.PORT ?? "3000"`) instead of widening to `| undefined`. One fixture schema is snapshot-rendered through every target in CI; `gen --check` compiles the output when the toolchain is present.
 
 ## 8. Cloud
 

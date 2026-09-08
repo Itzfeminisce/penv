@@ -6,8 +6,9 @@ use crate::error::Error;
 use crate::folder::describe;
 use crate::target::{INT_TYPE, Target};
 
-/// A template sees the schema JSON, `penv.version`, and one computed field per
-/// key: `lang_type`. Casting is the template's own business.
+/// A template sees the schema JSON, `penv.version`, the target's `[options]`
+/// table, and one computed field per key: `lang_type`. Casting is the
+/// template's own business.
 pub fn render(target: &Target, schema: &Value, penv_version: &str) -> Result<String, Error> {
     let env = environment();
     let mut context = schema.clone();
@@ -25,6 +26,7 @@ pub fn render(target: &Target, schema: &Value, penv_version: &str) -> Result<Str
         key["lang_type"] = Value::String(lang);
     }
     context["penv"] = json!({ "version": penv_version });
+    context["options"] = serde_json::to_value(&target.options).unwrap_or_else(|_| json!({}));
 
     env.render_str(&target.template, Jinja::from_serialize(&context))
         .map_err(|e| Error::Render {
@@ -169,6 +171,7 @@ mod tests {
             output: "out".into(),
             detect: vec![],
             types,
+            options: toml::Table::new(),
             check: None,
             template: template.into(),
             source: Source::BuiltIn,
@@ -310,6 +313,31 @@ mod tests {
             json!([key("NODE_ENV", "enum", json!(["a", "b"]))]),
         );
         assert_eq!(out, "[\"a\",\"b\"]");
+    }
+
+    #[test]
+    fn the_options_table_reaches_the_template_whatever_it_holds() {
+        let mut target = target(
+            "{{ options.key_case }} {{ options.width }}",
+            "values | join('|')",
+        );
+        target.options = toml::from_str("key_case = \"camel\"\nwidth = 80\n").unwrap();
+        let out = render(
+            &target,
+            &schema(json!([key("PORT", "port", json!([]))])),
+            "9.9.9",
+        )
+        .unwrap();
+        assert_eq!(out, "camel 80");
+    }
+
+    #[test]
+    fn a_target_with_no_options_still_lets_a_template_ask() {
+        let out = rendered(
+            "{% if options.key_case is defined %}set{% else %}absent{% endif %}",
+            json!([key("PORT", "port", json!([]))]),
+        );
+        assert_eq!(out, "absent");
     }
 
     #[test]

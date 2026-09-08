@@ -5,18 +5,18 @@ export const env = {
   DATABASE_URL: process.env.DATABASE_URL as string,
   STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY as string,
   /** Where the browser is sent back to after a redirect. */
-  NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL as string | undefined,
-  PORT: process.env.PORT === undefined ? undefined : Number(process.env.PORT),
-  NODE_ENV: process.env.NODE_ENV as "development" | "staging" | "production" | undefined,
+  NEXT_PUBLIC_APP_URL: (process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000") as string,
+  PORT: Number(process.env.PORT ?? "3000"),
+  NODE_ENV: (process.env.NODE_ENV ?? "development") as "development" | "staging" | "production",
   /** The tier this deployment serves. */
   PLAN_TIER: process.env.PLAN_TIER as "free" | "pro" | "enterprise",
   /** How long a cached value stays fresh. */
-  CACHE_TTL_SECONDS: process.env.CACHE_TTL_SECONDS === undefined ? undefined : Number(process.env.CACHE_TTL_SECONDS),
+  CACHE_TTL_SECONDS: Number(process.env.CACHE_TTL_SECONDS ?? "1.5"),
   MAX_RETRIES: Number(process.env.MAX_RETRIES),
-  FEATURE_BILLING: process.env.FEATURE_BILLING === undefined ? undefined : process.env.FEATURE_BILLING === "true",
+  FEATURE_BILLING: (process.env.FEATURE_BILLING ?? "false") === "true",
   DEBUG_TRACING: process.env.DEBUG_TRACING === "true",
   /** Where failures are mailed. */
-  ALERTS_EMAIL: process.env.ALERTS_EMAIL as string | undefined,
+  ALERTS_EMAIL: (process.env.ALERTS_EMAIL ?? "ops@example.test") as string,
   SUPPORT_NOTE: process.env.SUPPORT_NOTE as string | undefined,
 } as const;
 
