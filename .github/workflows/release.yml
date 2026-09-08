@@ -27,6 +27,19 @@ jobs:
       - if: contains(matrix.target, 'linux')
         run: cargo install cross --locked
       - run: ${{ contains(matrix.target, 'linux') && 'cross' || 'cargo' }} build --release --locked -p penv --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=target/${{ matrix.target }}/release
+          name=penv-${GITHUB_REF_NAME}-${{ matrix.target }}
+          mkdir -p dist
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            7z a -tzip "dist/$name.zip" "./$out/penv.exe" >/dev/null
+          else
+            tar -C "$out" -czf "dist/$name.tar.gz" penv
+          fi
+          (cd dist && sha256sum "$name".* > "$name.sha256")
       - uses: softprops/action-gh-release@v2
         with:
-          files: target/${{ matrix.target }}/release/penv*
+          files: dist/*
