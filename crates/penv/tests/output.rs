@@ -1,3 +1,4 @@
+use penv::cli::Format;
 use penv::env::Env;
 use penv::error::{CliError, Exit};
 use penv::output::{Output, Render, Report, resolve, table};
@@ -13,7 +14,7 @@ fn env(pairs: &[(&str, &str)]) -> Env {
 #[test]
 fn a_terminal_gets_text_with_colour() {
     assert_eq!(
-        resolve(false, false, TTY, &env(&[])),
+        resolve(false, None, false, TTY, &env(&[])),
         Render {
             json: false,
             color: true
@@ -24,7 +25,7 @@ fn a_terminal_gets_text_with_colour() {
 #[test]
 fn a_pipe_gets_json() {
     assert_eq!(
-        resolve(false, false, PIPE, &env(&[])),
+        resolve(false, None, false, PIPE, &env(&[])),
         Render {
             json: true,
             color: false
@@ -34,16 +35,22 @@ fn a_pipe_gets_json() {
 
 #[test]
 fn the_json_flag_and_the_agent_flag_both_force_json() {
-    assert!(resolve(true, false, TTY, &env(&[])).json);
-    assert!(resolve(false, true, TTY, &env(&[])).json);
+    assert!(resolve(true, None, false, TTY, &env(&[])).json);
+    assert!(resolve(false, None, true, TTY, &env(&[])).json);
+}
+
+#[test]
+fn the_format_flag_beats_what_stdout_is_attached_to() {
+    assert!(!resolve(false, Some(Format::Text), false, PIPE, &env(&[])).json);
+    assert!(resolve(false, Some(Format::Json), false, TTY, &env(&[])).json);
 }
 
 #[test]
 fn json_is_never_coloured() {
     for render in [
-        resolve(true, false, TTY, &env(&[])),
-        resolve(false, true, TTY, &env(&[])),
-        resolve(false, false, PIPE, &env(&[])),
+        resolve(true, None, false, TTY, &env(&[])),
+        resolve(false, None, true, TTY, &env(&[])),
+        resolve(false, None, false, PIPE, &env(&[])),
     ] {
         assert!(!render.color);
     }
@@ -51,13 +58,13 @@ fn json_is_never_coloured() {
 
 #[test]
 fn no_color_and_clicolor_are_honoured() {
-    assert!(!resolve(false, false, TTY, &env(&[("NO_COLOR", "1")])).color);
-    assert!(!resolve(false, false, TTY, &env(&[("CLICOLOR", "0")])).color);
+    assert!(!resolve(false, None, false, TTY, &env(&[("NO_COLOR", "1")])).color);
+    assert!(!resolve(false, None, false, TTY, &env(&[("CLICOLOR", "0")])).color);
     assert!(
-        resolve(false, false, TTY, &env(&[("NO_COLOR", "")])).color,
+        resolve(false, None, false, TTY, &env(&[("NO_COLOR", "")])).color,
         "an empty NO_COLOR does not opt out"
     );
-    assert!(resolve(false, false, TTY, &env(&[("CLICOLOR", "1")])).color);
+    assert!(resolve(false, None, false, TTY, &env(&[("CLICOLOR", "1")])).color);
 }
 
 fn rendered(render: Render, report: &Report) -> String {

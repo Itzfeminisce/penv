@@ -38,6 +38,16 @@ pub fn validate(schema: &Schema, values: &Values) -> Vec<Violation> {
         .collect()
 }
 
+/// Values supplied that the schema does not declare. Drift, not a violation:
+/// `run` masks them and `check` names them.
+pub fn extras(schema: &Schema, values: &Values) -> Vec<String> {
+    values
+        .keys()
+        .filter(|name| schema.get(name).is_none())
+        .cloned()
+        .collect()
+}
+
 /// Check one key against the value supplied for it, if any.
 pub fn validate_key(key: &Key, value: Option<&str>) -> Vec<Violation> {
     let mut out = Vec::new();
@@ -66,16 +76,6 @@ pub fn validate_key(key: &Key, value: Option<&str>) -> Vec<Violation> {
                     name,
                     "type",
                     format!("{name} must be a number."),
-                ));
-                return out;
-            }
-        }
-        BaseType::Integer => {
-            if value.parse::<i64>().is_err() {
-                out.push(Violation::new(
-                    name,
-                    "type",
-                    format!("{name} must be a whole number."),
                 ));
                 return out;
             }
@@ -171,6 +171,11 @@ pub fn validate_key(key: &Key, value: Option<&str>) -> Vec<Violation> {
                     ));
                 }
             }
+            "isInt" if arg == "true" && value.parse::<i64>().is_err() => out.push(Violation::new(
+                name,
+                rule,
+                format!("{name} must be a whole number."),
+            )),
             "min" => {
                 if let (Ok(n), Ok(min)) = (value.parse::<f64>(), arg.parse::<f64>())
                     && n < min
@@ -193,6 +198,8 @@ pub fn validate_key(key: &Key, value: Option<&str>) -> Vec<Violation> {
                     ));
                 }
             }
+            // matches and precision are parsed and preserved for the cloud and the
+            // targets; penv carries no regex engine, so it enforces neither.
             _ => {}
         }
     }

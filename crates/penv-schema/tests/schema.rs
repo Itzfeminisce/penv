@@ -191,7 +191,7 @@ fn round_trips_every_decorator() {
 # @defaultRequired=false
 
 # The primary store.
-# @type=url @required @sensitive @example=\"postgres://localhost/app\" @docs=https://example.test/db @since=1.2.0 @deprecated=\"use STORE_URL\" @rotate=90d @dynamic=vault
+# @type=url @required @sensitive @example=\"postgres://localhost/app\" @docs=https://example.test/db @since=1.2.0 @deprecated=\"use STORE_URL\" @rotate=90d @dynamicFrom=vault @dynamic
 DATABASE_URL=
 ";
     let once = parse(source).unwrap();
@@ -199,7 +199,8 @@ DATABASE_URL=
     assert_eq!(once, twice);
     let key = twice.get("DATABASE_URL").unwrap();
     assert_eq!(key.since.as_deref(), Some("1.2.0"));
-    assert_eq!(key.dynamic.as_deref(), Some("vault"));
+    assert_eq!(key.dynamic_from.as_deref(), Some("vault"));
+    assert_eq!(key.dynamic, Some(true));
     assert!(key.sensitive);
 }
 
@@ -230,7 +231,8 @@ fn json_carries_the_ir() {
             "since": null,
             "deprecated": null,
             "rotate": "90d",
-            "dynamic": null
+            "dynamic": null,
+            "dynamicFrom": null
         })
     );
 }
@@ -251,7 +253,7 @@ fn validate_reports_a_missing_required_value() {
 #[test]
 fn validate_checks_each_type() {
     let schema = parse(
-        "# @type=url\nA_URL=\n\n# @type=port\nA_PORT=\n\n# @type=email\nAN_EMAIL=\n\n# @type=boolean\nA_FLAG=\n\n# @type=integer\nA_COUNT=\n",
+        "# @type=url\nA_URL=\n\n# @type=port\nA_PORT=\n\n# @type=email\nAN_EMAIL=\n\n# @type=boolean\nA_FLAG=\n\n# @type=number(isInt=true)\nA_COUNT=\n",
     )
     .unwrap();
     let found = validate(
@@ -266,7 +268,7 @@ fn validate_checks_each_type() {
     );
     let keys: Vec<&str> = found.iter().map(|v| v.key.as_str()).collect();
     assert_eq!(keys, ["A_URL", "A_PORT", "AN_EMAIL", "A_FLAG", "A_COUNT"]);
-    assert!(found.iter().all(|v| v.rule == "type"));
+    assert!(found.iter().all(|v| v.rule == "type" || v.rule == "isInt"));
 
     let ok = validate(
         &schema,
@@ -318,4 +320,102 @@ fn no_violation_message_carries_a_value() {
 fn a_key_with_a_default_is_satisfied_when_the_value_is_absent() {
     let schema = parse("# @type=port @required\nPORT=3000\n").unwrap();
     assert!(validate(&schema, &values(&[])).is_empty());
+}
+
+#[test]
+fn a_type_call_may_carry_whitespace_inside_its_brackets() {
+    let schema = parse(
+        "# @type=enum(development, staging, production) @sensitive=false\nNODE_ENV=development\n\n# @type=string( startsWith = sk_ , maxLength = 64 )\nA_TOKEN=\n",
+    )
+    .expect("whitespace inside the brackets parses");
+    let node_env = schema.get("NODE_ENV").unwrap();
+    assert_eq!(
+        node_env.ty.members,
+        ["development", "staging", "production"]
+    );
+    assert!(!node_env.sensitive, "the decorator after the call is read");
+    let token = schema.get("A_TOKEN").unwrap();
+    assert_eq!(token.ty.constraint("startsWith"), Some("sk_"));
+    assert_eq!(token.ty.constraint("maxLength"), Some("64"));
+}
+
+#[test]
+fn a_header_block_sitting_on_the_first_key_is_still_the_header() {
+    let schema =
+        parse("# @penv=acme/api-gateway @schema=1 @defaultSensitive=false\nDATABASE_URL=\n")
+            .expect("a header with no blank line after it parses");
+    assert_eq!(schema.org.as_deref(), Some("acme"));
+    assert_eq!(schema.project.as_deref(), Some("api-gateway"));
+    assert!(!schema.default_sensitive);
+    let key = schema.get("DATABASE_URL").unwrap();
+    assert_eq!(
+        key.ty.base,
+        BaseType::String,
+        "the header block gives the key nothing"
+    );
+    assert!(!key.sensitive, "the header applied to the key under it");
+}
+
+#[test]
+fn integer_is_not_a_type_and_isint_is_the_constraint() {
+    let err = parse("# @type=integer\nA_COUNT=\n").unwrap_err();
+    assert_eq!(err[0].code, "unknown_type");
+    assert!(err[0].message.contains("isInt"), "{}", err[0].message);
+
+    let schema = parse("# @type=number(isInt=true)\nA_COUNT=\n").unwrap();
+    let ty = &schema.get("A_COUNT").unwrap().ty;
+    assert_eq!(ty.base, BaseType::Number);
+    assert_eq!(ty.constraint("isInt"), Some("true"));
+    assert_eq!(ty.to_json()["name"], "number");
+    assert_eq!(ty.to_json()["constraints"]["isInt"], "true");
+
+    assert!(validate(&schema, &values(&[("A_COUNT", "12")])).is_empty());
+    let found = validate(&schema, &values(&[("A_COUNT", "1.5")]));
+    assert_eq!(found[0].rule, "isInt");
+}
+
+#[test]
+fn matches_and_precision_are_preserved_and_never_enforced() {
+    let schema =
+        parse("# @type=string(matches=\"^sk_[a-z]+$\")\nA_TOKEN=\n\n# @type=number(precision=2)\nA_RATE=\n")
+            .unwrap();
+    assert_eq!(
+        schema.get("A_TOKEN").unwrap().ty.constraint("matches"),
+        Some("^sk_[a-z]+$")
+    );
+    assert_eq!(
+        schema.get("A_RATE").unwrap().ty.constraint("precision"),
+        Some("2")
+    );
+    // penv carries no regex engine, so neither constraint can fail a value.
+    assert!(
+        validate(
+            &schema,
+            &values(&[("A_TOKEN", "nothing-like-it"), ("A_RATE", "1.5555")])
+        )
+        .is_empty()
+    );
+    assert_eq!(parse(&render(&schema)).unwrap(), schema);
+}
+
+#[test]
+fn the_spec_booleans_are_kept_and_never_take_a_value() {
+    let schema =
+        parse("# @type=string @static\nA_KEY=\n\n# @type=string @dynamic\nB_KEY=\n").unwrap();
+    assert_eq!(schema.get("A_KEY").unwrap().dynamic, Some(false));
+    assert_eq!(schema.get("B_KEY").unwrap().dynamic, Some(true));
+    assert_eq!(parse(&render(&schema)).unwrap(), schema);
+
+    let err = parse("# @type=string @dynamic=false\nA_KEY=\n").unwrap_err();
+    assert_eq!(err[0].code, "invalid_decorator_value");
+}
+
+#[test]
+fn extras_name_the_keys_the_schema_does_not_declare() {
+    let schema = parse(EXAMPLE).unwrap();
+    let found = penv_schema::extras(
+        &schema,
+        &values(&[("PORT", "3000"), ("LEGACY_API_KEY", "unused")]),
+    );
+    assert_eq!(found, ["LEGACY_API_KEY"]);
 }

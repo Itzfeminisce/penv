@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use penv_schema::{Diagnostic, Values, Violation, validate, validate_key};
+use penv_schema::{Diagnostic, Values, Violation, extras, validate, validate_key};
 use serde_json::{Value, json};
 
 use crate::error::{CliError, Exit};
@@ -37,7 +37,7 @@ pub fn run(out: &Output, cwd: &Path, only: Option<&str>) -> Result<Report, CliEr
                 .collect::<Vec<_>>()
                 .join("\n");
             return Ok(
-                Report::new(body(&schema_path, None, &diagnostics, &[], &[]), text)
+                Report::new(body(&schema_path, None, &diagnostics, &[], &[], &[]), text)
                     .with_exit(Exit::Validation),
             );
         }
@@ -67,6 +67,12 @@ pub fn run(out: &Output, cwd: &Path, only: Option<&str>) -> Result<Report, CliEr
         }
     };
 
+    // Drift is a warning, not a violation: it never changes the exit code.
+    let drift = match only {
+        Some(_) => Vec::new(),
+        None => extras(&schema, &values),
+    };
+
     let mut lines: Vec<String> = Vec::new();
     if violations.is_empty() {
         let checked = only.map_or(schema.keys.len(), |_| 1);
@@ -81,6 +87,13 @@ pub fn run(out: &Output, cwd: &Path, only: Option<&str>) -> Result<Report, CliEr
             .iter()
             .map(|v| format!("{} {}", style.red("fail"), v.message)),
     );
+    lines.extend(drift.iter().map(|key| {
+        style.dim(&format!(
+            "drift {key} is in {} and not in {}; penv masks it but never validates it",
+            show(&env_path),
+            show(&schema_path)
+        ))
+    }));
     lines.extend(warnings.iter().map(|w| {
         style.dim(&format!(
             "note {}:{} {}",
@@ -90,16 +103,35 @@ pub fn run(out: &Output, cwd: &Path, only: Option<&str>) -> Result<Report, CliEr
         ))
     }));
 
-    let report = Report::new(
+    let mut report = Report::new(
         body(
             &schema_path,
             env_path.is_file().then(|| show(&env_path)),
             &[],
             &violations,
             &warnings,
+            &drift,
         ),
         lines.join("\n"),
     );
+    if only.is_none() {
+        // Guard coverage is part of a check; a stale guard is reported, never failed on.
+        let guards = super::guard::run(out, cwd, true, false, &[])?;
+        for harness in guards.json["harnesses"].as_array().into_iter().flatten() {
+            for file in harness["files"].as_array().into_iter().flatten() {
+                if file["status"] != "current" {
+                    report.text.push_str(&format!(
+                        "\n{} guard {} {} is {}; run penv guard",
+                        style.dim("note"),
+                        harness["name"].as_str().unwrap_or_default(),
+                        file["path"].as_str().unwrap_or_default(),
+                        file["status"].as_str().unwrap_or_default()
+                    ));
+                }
+            }
+        }
+        report.json["guards"] = guards.json["harnesses"].clone();
+    }
     Ok(if violations.is_empty() {
         report
     } else {
@@ -113,6 +145,7 @@ pub(super) fn body(
     diagnostics: &[Diagnostic],
     violations: &[Violation],
     warnings: &[penv_dotenv::Warning],
+    drift: &[String],
 ) -> Value {
     json!({
         "schema": show(schema_path),
@@ -124,6 +157,11 @@ pub(super) fn body(
             "line": w.line,
             "code": w.code,
             "message": w.message,
+        })).collect::<Vec<_>>(),
+        "drift": drift.iter().map(|key| json!({
+            "key": key,
+            "code": "drift",
+            "message": format!("{key} has a value with no block in the schema. penv masks it, and validates nothing about it. Add a block, or drop the key."),
         })).collect::<Vec<_>>(),
     })
 }

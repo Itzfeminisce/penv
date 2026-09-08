@@ -2,6 +2,7 @@ use std::io::Write;
 
 use serde_json::Value;
 
+use crate::cli::Format;
 use crate::env::Env;
 use crate::error::{CliError, Exit};
 
@@ -49,8 +50,18 @@ pub struct Render {
 
 /// JSON whenever stdout is not a terminal, or the caller asked for it. Colour only
 /// on a terminal that has not opted out.
-pub fn resolve(force_json: bool, agent: bool, stdout_tty: bool, env: &Env) -> Render {
-    let json = force_json || agent || !stdout_tty;
+pub fn resolve(
+    force_json: bool,
+    format: Option<Format>,
+    agent: bool,
+    stdout_tty: bool,
+    env: &Env,
+) -> Render {
+    let json = match format {
+        Some(Format::Json) => true,
+        Some(Format::Text) => false,
+        None => force_json || agent || !stdout_tty,
+    };
     let opted_out = env.get("NO_COLOR").is_some_and(|v| !v.is_empty())
         || env.get("CLICOLOR").is_some_and(|v| v == "0");
     Render {

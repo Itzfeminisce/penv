@@ -4,44 +4,18 @@ use penv_schema::{
 
 use crate::read::Dotenv;
 
-/// Name fragments that make a key sensitive whatever its value looks like.
-const SENSITIVE_FRAGMENTS: [&str; 7] = [
-    "KEY",
-    "SECRET",
-    "TOKEN",
-    "PASSWORD",
-    "PRIVATE",
-    "DSN",
-    "CREDENTIAL",
-];
-
-/// Vendor prefixes that mark a value as issued credential material.
-const CREDENTIAL_PREFIXES: [&str; 10] = [
-    "sk_",
-    "rk_",
-    "xoxb-",
-    "xoxp-",
-    "ghp_",
-    "gho_",
-    "github_pat_",
-    "AKIA",
-    "AIza",
-    "-----BEGIN",
-];
-
-/// Draft a schema from a `.env`. Sensitive values are never carried into it.
+/// Draft a schema from a `.env`. Every key is sensitive and required unless a
+/// bundler prefix or a value too dull to be a secret says otherwise.
 pub fn infer(env: &Dotenv) -> Schema {
     let mut schema = Schema::default();
     for entry in &env.entries {
-        let sensitive = is_sensitive(&entry.key, &entry.value);
+        let prefixed = is_public_prefixed(&entry.key);
         let ty = infer_type(&entry.key, &entry.value);
-        let default = if sensitive || entry.value.is_empty() {
-            None
-        } else {
-            Some(entry.value.clone())
-        };
+        let copied = !entry.value.is_empty() && (prefixed || is_dull(&entry.value));
+        let default = copied.then(|| entry.value.clone());
+        let sensitive = !prefixed && !copied;
         // Write @sensitive only where the prefix rule alone would not reach the same answer.
-        let inferred_sensitive = !is_public_prefixed(&entry.key);
+        let inferred_sensitive = !prefixed;
         schema.keys.push(Key {
             name: entry.key.clone(),
             ty,
@@ -55,55 +29,32 @@ pub fn infer(env: &Dotenv) -> Schema {
     schema
 }
 
-fn is_sensitive(key: &str, value: &str) -> bool {
-    if is_public_prefixed(key) {
-        return false;
-    }
-    let name = key.to_ascii_uppercase();
-    SENSITIVE_FRAGMENTS.iter().any(|f| name.contains(f)) || looks_like_credential(value)
+/// A value the committed schema may carry: nothing here can be a credential.
+fn is_dull(value: &str) -> bool {
+    parse_boolean(value).is_some()
+        || value.parse::<i64>().is_ok()
+        || is_lowercase_word(value)
+        || is_loopback_url(value)
 }
 
-fn looks_like_credential(value: &str) -> bool {
-    if value.is_empty() {
-        return false;
-    }
-    if CREDENTIAL_PREFIXES.iter().any(|p| value.starts_with(p)) {
-        return true;
-    }
-    is_jwt(value) || is_long_opaque(value) || has_userinfo(value)
+fn is_lowercase_word(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_lowercase())
 }
 
-/// A connection string that carries its own password, such as a database URL.
-fn has_userinfo(value: &str) -> bool {
-    let Some((_, rest)) = value.split_once("://") else {
+/// `http://localhost:3000` and nothing that could carry a credential in it.
+fn is_loopback_url(value: &str) -> bool {
+    let Some((scheme, rest)) = value.split_once("://") else {
         return false;
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    authority
-        .rsplit_once('@')
-        .is_some_and(|(userinfo, _)| userinfo.contains(':'))
-}
-
-fn is_jwt(value: &str) -> bool {
-    let parts: Vec<&str> = value.split('.').collect();
-    parts.len() == 3
-        && value.starts_with("eyJ")
-        && parts.iter().all(|p| {
-            p.len() >= 8
-                && p.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        })
-}
-
-/// A long unbroken token with mixed case and digits reads as a generated secret.
-fn is_long_opaque(value: &str) -> bool {
-    value.len() >= 32
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-'))
-        && value.chars().any(|c| c.is_ascii_digit())
-        && value.chars().any(|c| c.is_ascii_lowercase())
-        && value.chars().any(|c| c.is_ascii_uppercase())
+    if !matches!(scheme, "http" | "https") || rest.contains('?') {
+        return false;
+    }
+    let authority = rest.split(['/', '#']).next().unwrap_or_default();
+    if authority.contains('@') {
+        return false;
+    }
+    let host = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
+    matches!(host, "localhost" | "127.0.0.1")
 }
 
 fn infer_type(key: &str, value: &str) -> Type {
@@ -124,7 +75,9 @@ fn infer_type(key: &str, value: &str) -> Type {
         return Type::new(BaseType::Boolean);
     }
     if value.parse::<i64>().is_ok() {
-        return Type::new(BaseType::Integer);
+        let mut ty = Type::new(BaseType::Number);
+        ty.constraints.push(("isInt".into(), "true".into()));
+        return ty;
     }
     if matches!(value.parse::<f64>(), Ok(n) if n.is_finite()) {
         return Type::new(BaseType::Number);

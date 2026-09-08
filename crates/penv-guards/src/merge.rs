@@ -186,6 +186,7 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            executable: false,
             template: "settings.tmpl".into(),
             body: String::new(),
         }

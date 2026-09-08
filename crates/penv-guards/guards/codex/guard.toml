@@ -9,3 +9,7 @@ path = ".codex/config.toml"
 format = "toml"
 merge = "append-unique"
 template = "config.toml.tmpl"
+
+[hook]
+payload = "generic"
+deny = { stderr = "{{ reason }}", exit = 2 }

@@ -164,3 +164,104 @@ fn a_megabyte_through_twenty_secrets_is_quick() {
     }
     assert!(elapsed.as_secs_f64() < 1.0, "took {elapsed:?}");
 }
+
+/// A base64 encoder for the test only: the crate's own is private, and a test
+/// that reuses it would prove nothing.
+fn b64(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for group in input.chunks(3) {
+        let n = (group[0] as u32) << 16
+            | (*group.get(1).unwrap_or(&0) as u32) << 8
+            | *group.get(2).unwrap_or(&0) as u32;
+        for shift in [18, 12, 6, 0].iter().take(group.len() + 1) {
+            out.push(ALPHABET[((n >> shift) & 63) as usize] as char);
+        }
+        for _ in group.len() + 1..4 {
+            out.push('=');
+        }
+    }
+    out
+}
+
+#[test]
+fn the_hex_forms_are_caught_in_both_cases() {
+    let value = "sk_test_FAKE0000";
+    let lower: String = value.bytes().map(|b| format!("{b:02x}")).collect();
+    let upper = lower.to_uppercase();
+    for form in [lower, upper] {
+        let out = one(&[value], &format!("hex {form} end"));
+        assert_eq!(out, format!("hex sk{BLOCKS} end"), "{form}");
+    }
+}
+
+#[test]
+fn the_percent_encoded_form_is_caught_in_both_cases() {
+    let value = "pw?A_FAKE1234~";
+    for form in ["pw%3FA_FAKE1234~", "pw%3fA_FAKE1234~"] {
+        let out = one(&[value], &format!("url=https://example.test/?q={form}"));
+        assert_eq!(
+            out,
+            format!("url=https://example.test/?q=pw{BLOCKS}"),
+            "{form}"
+        );
+    }
+}
+
+#[test]
+fn a_secret_base64ed_inside_a_larger_body_is_caught_at_every_phase() {
+    let secret = "sk_test_FAKE0000";
+    // One prefix per phase: the secret starts at byte 0, 1 and 2 of a group.
+    for prefix in ["", "k", "k="] {
+        let blob = b64(format!("{prefix}{secret};tail").as_bytes());
+        let out = one(&[secret], &format!("body {blob} end"));
+        assert!(!out.contains(&blob), "phase {}: {out}", prefix.len());
+        assert!(out.contains(BLOCKS), "phase {}: {out}", prefix.len());
+    }
+}
+
+#[test]
+fn base64_wrapped_across_lines_is_still_caught() {
+    let secret = "sk_test_FAKE0000";
+    let encoded = b64(secret.as_bytes());
+    let wrapped: String = encoded
+        .as_bytes()
+        .chunks(4)
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    let out = one(&[secret], &format!("body\n{wrapped}\nend\n"));
+    assert!(!out.contains(&encoded), "{out}");
+    assert!(!out.contains("QUtF"), "a wrapped group survived: {out}");
+    assert!(
+        out.starts_with("body\n") && out.ends_with("\nend\n"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_chunk_that_cannot_grow_into_a_secret_is_written_at_once() {
+    let mut masker = Masker::new(vec!["sk_test_FAKE0000".to_string()]);
+    let mut out = Vec::new();
+    masker.feed(b"Password: ", &mut out);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "Password: ",
+        "an interactive prompt must not wait for the next chunk"
+    );
+}
+
+#[test]
+fn a_secret_split_across_chunks_is_still_held_until_it_is_whole() {
+    let secret = "sk_test_FAKE0000";
+    let mut masker = Masker::new(vec![secret.to_string()]);
+    let mut out = Vec::new();
+    masker.feed(b"user: sk_test_", &mut out);
+    assert_eq!(String::from_utf8(out.clone()).unwrap(), "user: ");
+    masker.feed(b"FAKE0000\n", &mut out);
+    masker.finish(&mut out);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        format!("user: sk{BLOCKS}\n")
+    );
+}

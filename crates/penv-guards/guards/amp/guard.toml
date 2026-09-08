@@ -9,3 +9,7 @@ path = ".amp/settings.json"
 format = "json"
 merge = "replace-if-absent"
 template = "settings.json.tmpl"
+
+[hook]
+payload = "generic"
+deny = { stderr = "{{ reason }}", exit = 2 }

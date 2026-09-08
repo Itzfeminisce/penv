@@ -18,3 +18,7 @@ format = "json"
 merge = "deny-union"
 union = ["envVars", "injectHosts"]
 template = "user-settings.json.tmpl"
+
+[hook]
+payload = "claude-code"
+deny = { stdout = '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": {{ reason | quote }}}}', exit = 0 }

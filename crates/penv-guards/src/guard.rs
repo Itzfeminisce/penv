@@ -2,21 +2,6 @@ use serde::Deserialize;
 
 use crate::error::Error;
 
-/// The files that hold values. `.env.schema` is deliberately absent: it holds
-/// none, and an agent that cannot read it cannot help with the keys.
-pub const ENV_FILES: [&str; 10] = [
-    ".env",
-    ".env.local",
-    ".env.development",
-    ".env.development.local",
-    ".env.staging",
-    ".env.staging.local",
-    ".env.production",
-    ".env.production.local",
-    ".env.test",
-    ".env.test.local",
-];
-
 /// Array keys a merge unions instead of leaving alone.
 const DEFAULT_UNION: [&str; 5] = ["deny", "denyRead", "files", "envVars", "hooks"];
 
@@ -62,9 +47,60 @@ pub struct Write {
     pub merge: Merge,
     pub scope: Scope,
     pub union: Vec<String>,
+    /// A hook script the harness runs itself; it needs the execute bit.
+    pub executable: bool,
     pub template: String,
     /// The template body, read from the folder beside `guard.toml`.
     pub body: String,
+}
+
+/// The input shape a harness hands its hook. Three families cover every harness;
+/// a new one picks the family it speaks, not a branch in the binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Payload {
+    /// `tool_input` carrying a path, a pattern or a command.
+    ClaudeCode,
+    /// The read or shell fields at the top level of the object.
+    Cursor,
+    /// Anything else: the fields are found by name, wherever they sit.
+    #[default]
+    Generic,
+}
+
+/// What the harness expects to see when the hook refuses, as a template over
+/// `reason`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Deny {
+    #[serde(default)]
+    pub stdout: Option<String>,
+    #[serde(default)]
+    pub stderr: Option<String>,
+    pub exit: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hook {
+    #[serde(default)]
+    pub payload: Payload,
+    pub deny: Deny,
+}
+
+impl Hook {
+    /// What a harness with no folder of its own gets: a reason on stderr and the
+    /// exit code every hook protocol reads as a refusal.
+    pub fn generic() -> Hook {
+        Hook {
+            payload: Payload::Generic,
+            deny: Deny {
+                stdout: None,
+                stderr: Some("{{ reason }}".into()),
+                exit: 2,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +113,7 @@ pub struct Guard {
     /// Executables whose presence on PATH also means installed.
     pub exe: Vec<String>,
     pub writes: Vec<Write>,
+    pub hook: Option<Hook>,
     pub dir: String,
 }
 
@@ -106,6 +143,8 @@ struct File {
     exe: Vec<String>,
     #[serde(default, rename = "write")]
     writes: Vec<WriteFile>,
+    #[serde(default)]
+    hook: Option<Hook>,
 }
 
 #[derive(Deserialize)]
@@ -118,6 +157,8 @@ struct WriteFile {
     scope: Option<Scope>,
     #[serde(default)]
     union: Option<Vec<String>>,
+    #[serde(default)]
+    executable: bool,
     template: String,
 }
 
@@ -148,6 +189,14 @@ pub fn parse(
             message: "a guard with no [[write]] entry writes nothing".into(),
         });
     }
+    if let Some(hook) = &file.hook
+        && hook.deny.stdout.is_some() == hook.deny.stderr.is_some()
+    {
+        return Err(Error::Malformed {
+            dir: dir.to_string(),
+            message: "[hook] deny answers on stdout or on stderr, not both and not neither".into(),
+        });
+    }
 
     let writes = file
         .writes
@@ -165,6 +214,7 @@ pub fn parse(
                 union: w
                     .union
                     .unwrap_or_else(|| DEFAULT_UNION.iter().map(|s| s.to_string()).collect()),
+                executable: w.executable,
                 template: w.template,
                 body,
             })
@@ -178,6 +228,7 @@ pub fn parse(
         detect: file.detect,
         exe: file.exe,
         writes,
+        hook: file.hook,
         dir: dir.to_string(),
     })
 }
@@ -220,6 +271,10 @@ format = "json"
 merge = "deny-union"
 union = ["envVars"]
 template = "user.json.tmpl"
+
+[hook]
+payload = "cursor"
+deny = { stdout = '{"permission": "deny"}', exit = 0 }
 "#;
 
     fn guard() -> Guard {
@@ -250,6 +305,30 @@ template = "user.json.tmpl"
         let guard = guard();
         assert!(guard.writes[0].union.iter().any(|k| k == "denyRead"));
         assert_eq!(guard.writes[1].union, ["envVars"]);
+    }
+
+    #[test]
+    fn the_hook_response_shape_comes_out_of_the_folder() {
+        let hook = guard().hook.unwrap();
+        assert_eq!(hook.payload, Payload::Cursor);
+        assert_eq!(hook.deny.exit, 0);
+        assert_eq!(
+            hook.deny.stdout.as_deref(),
+            Some(r#"{"permission": "deny"}"#)
+        );
+    }
+
+    #[test]
+    fn a_deny_that_answers_nowhere_or_on_both_streams_is_refused() {
+        for deny in [
+            "deny = { exit = 2 }",
+            "deny = { stdout = 'a', stderr = 'b', exit = 2 }",
+        ] {
+            let without = CONFIG.split("[hook]").next().unwrap();
+            let config = format!("{without}[hook]\n{deny}\n");
+            let error = parse("acme", &config, &templates, "guards/acme").unwrap_err();
+            assert!(error.to_string().contains("not both and not neither"));
+        }
     }
 
     #[test]

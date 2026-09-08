@@ -1,9 +1,10 @@
 use minijinja::value::Value as Jinja;
-use minijinja::{AutoEscape, Environment, UndefinedBehavior, context};
+use minijinja::{Environment, context};
 use serde_json::{Value, json};
 
 use crate::error::Error;
-use crate::target::Target;
+use crate::folder::describe;
+use crate::target::{INT_TYPE, Target};
 
 /// A template sees the schema JSON, `penv.version`, and one computed field per
 /// key: `lang_type`. Casting is the template's own business.
@@ -19,7 +20,7 @@ pub fn render(target: &Target, schema: &Value, penv_version: &str) -> Result<Str
         })?;
 
     for key in keys.iter_mut() {
-        let base = key["type"]["name"].as_str().unwrap_or("string").to_string();
+        let base = mapped_name(target, &key["type"]).to_string();
         let lang = lang_type(&env, target, &base, &key["type"]["members"])?;
         key["lang_type"] = Value::String(lang);
     }
@@ -30,6 +31,21 @@ pub fn render(target: &Target, schema: &Value, penv_version: &str) -> Result<Str
             target: target.name.clone(),
             message: describe(&e),
         })
+}
+
+/// The `[types]` entry a key maps to: `integer` when a number is constrained to
+/// whole values and the target carries that entry, the base type otherwise.
+fn mapped_name<'a>(target: &Target, ty: &'a Value) -> &'a str {
+    let base = ty["name"].as_str().unwrap_or("string");
+    if base == "number" && is_int(ty) && target.types.contains_key(INT_TYPE) {
+        return INT_TYPE;
+    }
+    base
+}
+
+fn is_int(ty: &Value) -> bool {
+    let constraint = &ty["constraints"]["isInt"];
+    constraint == &Value::Bool(true) || constraint.as_str() == Some("true")
 }
 
 fn lang_type(
@@ -58,22 +74,12 @@ fn lang_type(
         })
 }
 
-fn describe(error: &minijinja::Error) -> String {
-    match error.detail() {
-        Some(detail) => format!("{error}: {detail}"),
-        None => error.to_string(),
-    }
-}
-
+/// The shared environment plus the case filters only a language target needs.
 fn environment() -> Environment<'static> {
-    let mut env = Environment::new();
-    env.set_undefined_behavior(UndefinedBehavior::Strict);
-    env.set_auto_escape_callback(|_| AutoEscape::None);
+    let mut env = crate::folder::environment();
     env.add_filter("pascal", pascal);
     env.add_filter("camel", camel);
     env.add_filter("snake", snake);
-    env.add_filter("quote", quote);
-    env.add_filter("json", to_json);
     env
 }
 
@@ -137,30 +143,18 @@ fn snake(value: &str) -> String {
         .join("_")
 }
 
-fn quote(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| format!("\"{value}\""))
-}
-
-fn to_json(value: Jinja) -> Result<String, minijinja::Error> {
-    serde_json::to_string(&value).map_err(|e| {
-        minijinja::Error::new(
-            minijinja::ErrorKind::InvalidOperation,
-            format!("value cannot be written as JSON: {e}"),
-        )
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::target::{Source, parse};
+    use crate::folder::Source;
+    use crate::target::parse;
     use std::collections::BTreeMap;
 
     fn target(template: &str, enum_expression: &str) -> Target {
         let types: BTreeMap<String, String> = [
             ("string", "string"),
             ("number", "number"),
-            ("integer", "number"),
+            ("integer", "int"),
             ("boolean", "boolean"),
             ("url", "string"),
             ("email", "string"),
@@ -175,6 +169,7 @@ mod tests {
             output: "out".into(),
             detect: vec![],
             types,
+            check: None,
             template: template.into(),
             source: Source::BuiltIn,
             dir: "built in".into(),
@@ -341,12 +336,33 @@ mod tests {
         for built_in in crate::BUILT_IN {
             parse(
                 built_in.name,
-                built_in.config,
-                built_in.template,
+                built_in.file("target.toml").unwrap(),
+                built_in.file("env.tmpl").unwrap(),
                 Source::BuiltIn,
                 "built in",
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn a_whole_number_takes_the_integer_entry_and_a_plain_number_does_not() {
+        let mut whole = key("MAX_RETRIES", "number", json!([]));
+        whole["type"]["constraints"] = json!({ "isInt": "true" });
+        let out = rendered(
+            "{% for key in keys %}{{ key.lang_type }};{% endfor %}",
+            json!([whole, key("CACHE_TTL", "number", json!([]))]),
+        );
+        assert_eq!(out, "int;number;");
+    }
+
+    #[test]
+    fn a_target_with_no_integer_entry_falls_back_to_number() {
+        let mut target = target("{{ keys[0].lang_type }}", "values | join('|')");
+        target.types.remove("integer");
+        let mut whole = key("MAX_RETRIES", "number", json!([]));
+        whole["type"]["constraints"] = json!({ "isInt": "true" });
+        let out = render(&target, &schema(json!([whole])), "9.9.9").unwrap();
+        assert_eq!(out, "number");
     }
 }

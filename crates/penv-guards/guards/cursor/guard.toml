@@ -1,5 +1,5 @@
 name = "cursor"
-description = "Cursor CLI deny rules and a beforeReadFile hook that fails closed."
+description = "Cursor CLI deny rules, and read and shell hooks that fail closed."
 scope = "project"
 detect = [".cursor", "~/.cursor"]
 exe = ["cursor"]
@@ -16,3 +16,7 @@ format = "json"
 merge = "deny-union"
 union = ["beforeReadFile", "beforeShellExecution"]
 template = "hooks.json.tmpl"
+
+[hook]
+payload = "cursor"
+deny = { stdout = '{"permission": "deny", "userMessage": {{ reason | quote }}, "user_message": {{ reason | quote }}}', exit = 0 }

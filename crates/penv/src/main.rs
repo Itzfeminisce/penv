@@ -1,6 +1,5 @@
 use std::io::IsTerminal;
 
-use clap::Parser;
 use penv::cli::Cli;
 use penv::commands;
 use penv::env::Env;
@@ -8,10 +7,11 @@ use penv::error::Exit;
 use penv::output::{Output, resolve};
 
 fn main() {
-    let cli = Cli::parse();
+    let cli = Cli::parse_checked();
     let env = Env::from_process();
     let out = Output::new(resolve(
         cli.json,
+        cli.format,
         cli.agent,
         std::io::stdout().is_terminal(),
         &env,

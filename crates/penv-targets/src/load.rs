@@ -1,104 +1,56 @@
 use crate::error::Error;
-use crate::target::{Source, Target, parse};
+use crate::folder::{self, BuiltIn, Roots, Tree};
+use crate::target::{Target, parse};
 
-/// Reading a tree of folders, so the loader is a pure function over one.
-pub trait Tree {
-    fn read(&self, path: &str) -> Option<String>;
-    /// Names of the directories directly under `path`.
-    fn dirs(&self, path: &str) -> Vec<String>;
-    fn exists(&self, path: &str) -> bool {
-        self.read(path).is_some()
-    }
-}
-
-/// Where targets are looked for. `repo` is the directory holding `.env.schema`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Roots {
-    pub repo: String,
-    pub home: Option<String>,
-}
-
-impl Roots {
-    pub fn new(repo: impl Into<String>, home: Option<String>) -> Roots {
-        Roots {
-            repo: repo.into(),
-            home,
+macro_rules! built_in {
+    ($name:literal) => {
+        BuiltIn {
+            name: $name,
+            files: &[
+                (
+                    "target.toml",
+                    include_str!(concat!("../targets/", $name, "/target.toml")),
+                ),
+                (
+                    "env.tmpl",
+                    include_str!(concat!("../targets/", $name, "/env.tmpl")),
+                ),
+            ],
         }
-    }
-}
-
-pub struct BuiltIn {
-    pub name: &'static str,
-    pub config: &'static str,
-    pub template: &'static str,
+    };
 }
 
 /// The folders shipped inside the binary. The layout on disk is the same one a
 /// user target uses.
-pub const BUILT_IN: &[BuiltIn] = &[
-    BuiltIn {
-        name: "ts",
-        config: include_str!("../targets/ts/target.toml"),
-        template: include_str!("../targets/ts/env.tmpl"),
-    },
-    BuiltIn {
-        name: "py",
-        config: include_str!("../targets/py/target.toml"),
-        template: include_str!("../targets/py/env.tmpl"),
-    },
-];
-
-fn folders(roots: &Roots, name: &str) -> Vec<(Source, String)> {
-    let mut out = vec![(Source::Repo, format!("{}/.penv/targets/{name}", roots.repo))];
-    if let Some(home) = &roots.home {
-        out.push((Source::User, format!("{home}/.penv/targets/{name}")));
-    }
-    out
-}
+pub const BUILT_IN: &[BuiltIn] = &[built_in!("ts"), built_in!("py")];
 
 /// Repo folder, then home folder, then built in. The first found wins and says
 /// where it came from.
 pub fn load(tree: &dyn Tree, roots: &Roots, name: &str) -> Result<Target, Error> {
-    let mut looked = Vec::new();
-    for (source, dir) in folders(roots, name) {
-        looked.push(dir.clone());
-        let Some(config) = tree.read(&format!("{dir}/target.toml")) else {
-            continue;
-        };
-        let template = tree
-            .read(&format!("{dir}/env.tmpl"))
-            .ok_or_else(|| Error::Malformed {
-                dir: dir.clone(),
-                message: "there is a target.toml but no env.tmpl".into(),
-            })?;
-        return parse(name, &config, &template, source, &dir);
-    }
-
-    looked.push("built in".into());
-    match BUILT_IN.iter().find(|b| b.name == name) {
-        Some(b) => parse(name, b.config, b.template, Source::BuiltIn, "built in"),
-        None => Err(Error::NotFound {
-            name: name.to_string(),
-            looked,
-        }),
-    }
+    let found =
+        folder::find(tree, roots, "targets", "target.toml", BUILT_IN, name).map_err(|looked| {
+            Error::NotFound {
+                name: name.to_string(),
+                looked,
+            }
+        })?;
+    let broken = |message: &str| Error::Malformed {
+        dir: found.dir.clone(),
+        message: message.to_string(),
+    };
+    let config = found
+        .file("target.toml")
+        .ok_or_else(|| broken("no target.toml"))?;
+    let template = found
+        .file("env.tmpl")
+        .ok_or_else(|| broken("there is a target.toml but no env.tmpl"))?;
+    parse(name, &config, &template, found.source, &found.dir)
 }
 
 /// Every target that can be loaded, built in ones plus whatever the two `.penv`
 /// folders add, each resolved through the same lookup order.
 pub fn available(tree: &dyn Tree, roots: &Roots) -> Vec<Target> {
-    let mut names: Vec<String> = BUILT_IN.iter().map(|b| b.name.to_string()).collect();
-    let mut roots_dirs = vec![format!("{}/.penv/targets", roots.repo)];
-    if let Some(home) = &roots.home {
-        roots_dirs.push(format!("{home}/.penv/targets"));
-    }
-    for dir in roots_dirs {
-        for name in tree.dirs(&dir) {
-            if !names.contains(&name) {
-                names.push(name);
-            }
-        }
-    }
+    let mut names = folder::names(tree, roots, "targets", BUILT_IN);
     names.sort();
     names
         .iter()
@@ -117,6 +69,7 @@ pub fn detected(tree: &dyn Tree, roots: &Roots, target: &Target) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::folder::Source;
     use std::collections::BTreeMap;
 
     #[derive(Default)]
@@ -152,7 +105,6 @@ mod tests {
 [types]
 string = "S"
 number = "N"
-integer = "I"
 boolean = "B"
 url = "U"
 email = "E"

@@ -70,12 +70,12 @@ pub fn run(out: &Output, cwd: &Path, env: &Env) -> Result<Report, CliError> {
     );
     if let Some(name) = detection.name() {
         text.push_str(&format!(
-            "\n{}   {} ({})\n{}  {}",
+            "\n{}   {} ({})\n{} {}",
             style.dim("agent"),
             style.bold(name),
             detection.confidence.as_str(),
-            style.dim("policy"),
-            describe(&policy),
+            style.dim("masking"),
+            if policy.mask { "on" } else { "off" },
         ));
     }
     text.push('\n');
@@ -89,13 +89,7 @@ pub fn run(out: &Output, cwd: &Path, env: &Env) -> Result<Report, CliError> {
             "next": next,
             "note": note,
             "agent": agent_json(&detection),
-            "policy": {
-                "json": policy.json,
-                "mask": policy.mask,
-                "revealAllowed": policy.reveal_allowed,
-                "pullAllowed": policy.pull_allowed,
-                "credentialTtlSecs": policy.credential_ttl_secs,
-            },
+            "masking": policy.mask,
         }),
         text,
     ))
@@ -113,28 +107,4 @@ fn agent_json(detection: &Detection) -> Value {
             "markers": detection.markers,
         }),
     }
-}
-
-/// The policy in force, in the order it bites.
-fn describe(policy: &Policy) -> String {
-    let mut parts = Vec::new();
-    parts.push(if policy.mask {
-        "output masked"
-    } else {
-        "output unmasked"
-    });
-    if policy.json {
-        parts.push("json");
-    }
-    if !policy.reveal_allowed {
-        parts.push("reveal refused");
-    }
-    if !policy.pull_allowed {
-        parts.push("pull refused");
-    }
-    format!(
-        "{}, credentials {}s",
-        parts.join(", "),
-        policy.credential_ttl_secs
-    )
 }

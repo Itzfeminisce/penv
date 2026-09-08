@@ -39,6 +39,15 @@ impl Block {
     fn is_empty(&self) -> bool {
         self.description.is_empty() && self.decorators.is_empty()
     }
+
+    fn has_header_decorator(&self) -> bool {
+        self.decorators.iter().any(|d| {
+            matches!(
+                d.name.as_str(),
+                "penv" | "schema" | "defaultSensitive" | "defaultRequired"
+            )
+        })
+    }
 }
 
 impl Parser {
@@ -74,6 +83,10 @@ impl Parser {
                 continue;
             }
 
+            if !first_block_done && block.has_header_decorator() {
+                self.take_header(&block);
+                block = Block::default();
+            }
             self.read_key(line, line_no, &block);
             block = Block::default();
             first_block_done = true;
@@ -184,7 +197,19 @@ impl Parser {
             return None;
         }
         let start = *i;
-        while *i < chars.len() && !chars[*i].is_whitespace() {
+        let mut depth = 0usize;
+        let mut quoted: Option<char> = None;
+        while *i < chars.len() {
+            let c = chars[*i];
+            match quoted {
+                Some(q) if c == q => quoted = None,
+                Some(_) => {}
+                None if c == '"' || c == '\'' => quoted = Some(c),
+                None if c == '(' => depth += 1,
+                None if c == ')' => depth = depth.saturating_sub(1),
+                None if depth == 0 && c.is_whitespace() => break,
+                None => {}
+            }
             *i += 1;
         }
         Some(chars[start..*i].iter().collect())
@@ -369,7 +394,22 @@ impl Parser {
                         }
                     }
                 }
-                "dynamic" => key.dynamic = self.require_value(d),
+                "dynamic" | "static" => {
+                    if d.value.is_some() {
+                        self.error(
+                            d.line,
+                            d.column,
+                            "invalid_decorator_value",
+                            format!(
+                                "line {}: @{} takes no value; write @dynamic or @static",
+                                d.line, d.name
+                            ),
+                        );
+                    } else {
+                        key.dynamic = Some(d.name == "dynamic");
+                    }
+                }
+                "dynamicFrom" => key.dynamic_from = self.require_value(d),
                 other => self.error(
                     d.line,
                     d.column,
@@ -436,7 +476,7 @@ impl Parser {
                 d.column,
                 "unknown_type",
                 format!(
-                    "line {}: {name} is not a penv type. Use string, number, integer, boolean, url, email, port or enum.",
+                    "line {}: {name} is not a penv type. Use string, number, boolean, url, email, port or enum. A whole number is number(isInt=true).",
                     d.line
                 ),
             );

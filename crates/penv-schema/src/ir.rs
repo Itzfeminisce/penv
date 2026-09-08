@@ -90,7 +90,10 @@ pub struct Key {
     pub since: Option<String>,
     pub deprecated: Option<String>,
     pub rotate: Option<String>,
-    pub dynamic: Option<String>,
+    /// The spec's `@dynamic` / `@static` pair: preserved, never acted on.
+    pub dynamic: Option<bool>,
+    /// penv's own marker: the engine the cloud resolves the value from.
+    pub dynamic_from: Option<String>,
 }
 
 impl Key {
@@ -108,6 +111,7 @@ impl Key {
             "deprecated": self.deprecated,
             "rotate": self.rotate,
             "dynamic": self.dynamic,
+            "dynamicFrom": self.dynamic_from,
         })
     }
 }
@@ -117,7 +121,6 @@ pub enum BaseType {
     #[default]
     String,
     Number,
-    Integer,
     Boolean,
     Url,
     Email,
@@ -130,7 +133,6 @@ impl BaseType {
         match self {
             BaseType::String => "string",
             BaseType::Number => "number",
-            BaseType::Integer => "integer",
             BaseType::Boolean => "boolean",
             BaseType::Url => "url",
             BaseType::Email => "email",
@@ -143,7 +145,6 @@ impl BaseType {
         Some(match s {
             "string" => BaseType::String,
             "number" => BaseType::Number,
-            "integer" => BaseType::Integer,
             "boolean" => BaseType::Boolean,
             "url" => BaseType::Url,
             "email" => BaseType::Email,
@@ -156,8 +157,15 @@ impl BaseType {
     /// Constraint names this type accepts inside its call parentheses.
     pub fn constraints(&self) -> &'static [&'static str] {
         match self {
-            BaseType::String => &["startsWith", "endsWith", "minLength", "maxLength"],
-            BaseType::Number | BaseType::Integer | BaseType::Port => &["min", "max"],
+            BaseType::String => &[
+                "startsWith",
+                "endsWith",
+                "minLength",
+                "maxLength",
+                "matches",
+            ],
+            BaseType::Number => &["min", "max", "isInt", "precision"],
+            BaseType::Port => &["min", "max"],
             _ => &[],
         }
     }
@@ -209,18 +217,19 @@ impl fmt::Display for Type {
         if self.members.is_empty() && self.constraints.is_empty() {
             return Ok(());
         }
-        let mut args: Vec<String> = self.members.iter().map(|m| quote_arg(m)).collect();
+        let mut args: Vec<String> = self.members.iter().map(|m| quote(m)).collect();
         args.extend(
             self.constraints
                 .iter()
-                .map(|(n, v)| format!("{n}={}", quote_arg(v))),
+                .map(|(n, v)| format!("{n}={}", quote(v))),
         );
         write!(f, "({})", args.join(","))
     }
 }
 
-fn quote_arg(v: &str) -> String {
-    if v.is_empty() || v.contains([' ', '\t', ',', '(', ')', '#', '"']) {
+/// The one quoting rule: decorator values, type arguments and defaults all use it.
+pub(crate) fn quote(v: &str) -> String {
+    if v.is_empty() || v.contains([' ', '\t', ',', '(', ')', '#', '"', '\'']) {
         format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         v.to_string()

@@ -37,6 +37,11 @@ const SHELL_FLAG: &str = "-c";
 #[cfg(not(windows))]
 const ECHO_VALUES: &str = "echo $STRIPE_SECRET_KEY $PORT";
 
+#[cfg(windows)]
+const ECHO_EXTRA: &str = "echo %LEGACY_API_KEY%";
+#[cfg(not(windows))]
+const ECHO_EXTRA: &str = "echo $LEGACY_API_KEY";
+
 const EXIT_SEVEN: &str = "exit 7";
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -193,4 +198,93 @@ fn a_cloud_schema_with_a_local_dotenv_runs_and_says_so() {
         stderr(&output)
     );
     assert!(!stdout(&output).contains(SECRET));
+}
+
+#[test]
+fn a_key_the_schema_does_not_declare_is_masked_and_reported_as_drift() {
+    let workspace = Workspace::new(&[
+        (".env.schema", &local_schema()),
+        (
+            ".env",
+            &format!("STRIPE_SECRET_KEY={SECRET}\nLEGACY_API_KEY=left_over_FAKE_0000\n"),
+        ),
+    ]);
+    let output = workspace.run(&[], ECHO_EXTRA);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        !text.contains("left_over_FAKE_0000"),
+        "an undeclared key came back in the clear: {text}"
+    );
+    assert!(
+        stderr(&output).contains("LEGACY_API_KEY"),
+        "the drift was not reported: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn check_reports_drift_without_failing() {
+    let workspace = Workspace::new(&[
+        (".env.schema", &local_schema()),
+        (
+            ".env",
+            &format!("STRIPE_SECRET_KEY={SECRET}\nLEGACY_API_KEY=left_over_FAKE_0000\n"),
+        ),
+    ]);
+    let output = Command::new(env!("CARGO_BIN_EXE_penv"))
+        .current_dir(workspace.path())
+        .args(["--agent", "check"])
+        .output()
+        .expect("penv runs");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "drift alone is not a failure"
+    );
+    let text = stdout(&output);
+    assert!(text.contains("\"drift\""), "{text}");
+    assert!(text.contains("LEGACY_API_KEY"), "{text}");
+    assert!(
+        !text.contains("left_over_FAKE_0000"),
+        "a value was printed: {text}"
+    );
+}
+
+#[test]
+fn no_mask_is_ignored_when_the_pipes_are_not_a_terminal() {
+    let workspace = Workspace::new(&[
+        (".env.schema", &local_schema()),
+        (".env", &format!("STRIPE_SECRET_KEY={SECRET}\n")),
+    ]);
+    let output = Command::new(env!("CARGO_BIN_EXE_penv"))
+        .current_dir(workspace.path())
+        .args(["run", "--no-mask", "--", SHELL, SHELL_FLAG, ECHO_VALUES])
+        .output()
+        .expect("penv runs");
+
+    assert!(
+        stderr(&output).contains("--no-mask"),
+        "the flag was honoured off a terminal: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn agent_and_format_text_is_a_parse_error() {
+    let workspace = Workspace::new(&[(".env.schema", &local_schema())]);
+    let output = Command::new(env!("CARGO_BIN_EXE_penv"))
+        .current_dir(workspace.path())
+        .args(["--agent", "--format", "text", "ls"])
+        .output()
+        .expect("penv runs");
+
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        stderr(&output).contains("--format text"),
+        "{}",
+        stderr(&output)
+    );
 }

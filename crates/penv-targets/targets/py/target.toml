@@ -11,3 +11,7 @@ url = "HttpUrl"
 email = "str"
 port = "int"
 enum = "'Literal[' ~ (values | map('quote') | join(', ')) ~ ']'"
+
+[check]
+command = ["python3", "-m", "py_compile", "{file}"]
+probe = ["python3", "--version"]

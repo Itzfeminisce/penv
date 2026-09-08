@@ -38,13 +38,14 @@ NODE_ENV=development
 ```
 
 Rules:
-- The header is the first comment block. `@penv=<org>/<project>` names the cloud project; absent means local mode. `@schema=<n>` is the grammar version the file was written with.
+- The header is the first comment block, whether or not a blank line follows it; a first block that sits directly on a key and contains a header decorator is still the header. `@penv=<org>/<project>` names the cloud project; absent means local mode. `@schema=<n>` is the grammar version the file was written with.
 - Decorators sit in `#` comment lines directly above a key. A comment line not starting with `@` is the key's description. The blank line ends a block.
 - A decorator is `@name` or `@name=value`. Never positional. Order never matters. Quote a value that contains whitespace or `#`.
-- Vocabulary follows `@env-spec` (varlock) verbatim: `@type=`, `@required`, `@optional`, `@sensitive`, `@sensitive=false`, `@defaultSensitive`, `@defaultRequired`, `@example`, `@docs`. Types: `string`, `number`, `integer`, `boolean`, `url`, `email`, `port`, `enum(a,b,c)`, plus the spec's function-call constraints such as `string(startsWith=sk_)`.
+- Vocabulary follows `@env-spec` (varlock) verbatim: `@type=`, `@required`, `@optional`, `@sensitive`, `@sensitive=false`, `@defaultSensitive`, `@defaultRequired`, `@example`, `@docs`. Types: `string`, `number`, `boolean`, `url`, `email`, `port`, `enum(a,b,c)`, plus the spec's function-call constraints such as `string(startsWith=sk_)` and `number(isInt=true)`. There is no `integer` type; integers are `number(isInt=true)`, and a target's `[types]` map may carry an `integer` entry used when that constraint is set. Whitespace inside parentheses is allowed.
 - Required is inferred: an empty value is required, a value present on the line is the default and makes the key optional. `@required`/`@optional` override.
 - Sensitive is inferred: sensitive by default, public when the key carries a bundler prefix (`NEXT_PUBLIC_`, `VITE_`, `PUBLIC_`, `EXPO_PUBLIC_`, `NUXT_PUBLIC_`, `REACT_APP_`) or `@sensitive=false`. A key that is both prefixed and `@sensitive` fails `check`.
-- penv extensions, only where the spec has no concept: `@since=<version>`, `@deprecated="<message>"`, `@rotate=<duration>`, `@dynamic=<engine>` (read-only marker rendered by the cloud). `@scope` does not exist; who reads a key is an authorization rule in the console.
+- Adopted from the spec as-is: `@deprecated`, and the boolean `@dynamic`/`@static` pair (accepted and preserved, not used by penv).
+- penv extensions, only where the spec has no concept: `@since=<version>`, `@rotate=<duration>`, `@dynamicFrom=<engine>` (read-only marker rendered by the cloud). `@scope` does not exist; who reads a key is an authorization rule in the console.
 - One concept, one name. No aliases. Unknown decorators are an error from `check`.
 - Nearest `.env.schema` upward from the working directory wins. A monorepo holds one per app.
 
@@ -64,7 +65,7 @@ cloud   @penv header, credential in the keychain, .env absent (or present only a
 | Command | Does | Fires automatically when |
 |---|---|---|
 | `penv` | Prints state and the one next command | no args |
-| `init` | Reads `.env`, writes `.env.schema`, gitignores `.env`, prints what it inferred; never prompts | `run` finds a `.env` with no schema |
+| `init` | Reads `.env`, writes `.env.schema`, gitignores `.env`, prints what it inferred; never prompts. Every key is sensitive and required unless bundler-prefixed. A value is copied into the schema as a default only when the key is bundler-prefixed, or the value is a boolean, an integer, a lowercase word of letters, or a localhost URL with no userinfo and no query | `run` finds a `.env` with no schema |
 | `run [--env E] -- cmd` | Validates, injects into the child only, masks child output when an agent is present | never |
 | `push` | Moves local values to the cloud, deletes `.env` | `init` when logged in, as an offer |
 | `pull` | Writes a plain `.env` | never |
@@ -108,7 +109,7 @@ cloud mode:
 no keychain (containers, servers) -> no cache, always online
 ```
 
-Target: under 50ms to exec on a warm cache. Injection is into the child environment only. Output masking scrubs the child's stdout and stderr for every sensitive value, boundary-safe across chunk splits, plus base64 and JSON-escaped forms of each value. Masking is on by default when an agent marker is present, and never TTY-gated in that case. `--no-mask` is a `human: true` flag.
+Target: under 50ms to exec on a warm cache. Injection is into the child environment only. Output masking scrubs the child's stdout and stderr for every sensitive value, boundary-safe across chunk splits, plus base64 and JSON-escaped forms of each value. The masker's secret list is every value present in the resolved environment except keys the schema marks public; a `.env` key the schema does not list is masked and `check` names it as drift. Masking is on by default when an agent marker is present, and never TTY-gated in that case. `--no-mask` is a `human: true` flag honoured only when stdin and stdout are both terminals and no agent is detected.
 
 ## 6. Agents
 
@@ -118,7 +119,7 @@ Detection is advisory and ordered, because vendors collide:
 
 An agent session flips: JSON output, masking on, `reveal` refused, `pull` refused unless `--i-am-human` is passed by a person, shorter credential TTL, and the session id (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`, `CURSOR_TRACE_ID`, `AMP_CURRENT_THREAD_ID`, `COPILOT_AGENT_SESSION_ID`) stamped on every cloud request for audit.
 
-`guard` writes what each harness enforces, from `.env.schema`, idempotently and additively. Guards are folders (`guards/<harness>/`) with a `guard.toml` (detect paths, files to merge, scope) and templates; the binary merges JSON or TOML fragments without ever weakening an existing rule. Ranked: Claude Code (`.claude/settings.json` deny rules in project scope, `sandbox.credentials` mask block printed for user scope, static-binary PreToolUse hook), Codex (permission profile denying `**/*.env`, `ignore_default_excludes=false`), Cursor (`.cursor/cli.json` deny, `.cursor/hooks.json` with `failClosed`), Amp (`amp.guardedFiles.allowlist: []`), Copilot CLI (permissions config plus `--secret-env-vars` names), Gemini (`.gemini/settings.json` PreToolUse), Cline (`.clinerules/hooks/`), Windsurf (`.windsurf/hooks.json`). Native Windows has no Claude Code sandbox; `guard --check` says so.
+`guard` writes what each harness enforces, from `.env.schema`, idempotently and additively. Guards are folders (`guards/<harness>/`) with a `guard.toml` (detect paths, files to merge, scope, and the hook response shape the harness expects) and templates; the binary knows no harness by name, and `penv hook <harness>` renders the deny response from the folder. Deny patterns are `.env` and `.env.*` (never `.env.schema`, which the hook allows by name), so a new environment file is covered without a list; the binary merges JSON or TOML fragments without ever weakening an existing rule. Ranked: Claude Code (`.claude/settings.json` deny rules in project scope, `sandbox.credentials` mask block printed for user scope, static-binary PreToolUse hook), Codex (permission profile denying `**/*.env`, `ignore_default_excludes=false`), Cursor (`.cursor/cli.json` deny, `.cursor/hooks.json` with `failClosed`), Amp (`amp.guardedFiles.allowlist: []`), Copilot CLI (permissions config plus `--secret-env-vars` names), Gemini (`.gemini/settings.json` PreToolUse), Cline (`.clinerules/hooks/`), Windsurf (`.windsurf/hooks.json`). Native Windows has no Claude Code sandbox; `guard --check` says so.
 
 The hook binary is `penv` itself (`penv hook claude-code`), never a script needing an interpreter, because a missing interpreter fails open.
 

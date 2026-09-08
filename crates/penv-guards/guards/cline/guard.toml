@@ -8,4 +8,9 @@ exe = []
 path = ".clinerules/hooks/PreToolUse"
 format = "text"
 merge = "append-unique"
+executable = true
 template = "PreToolUse.tmpl"
+
+[hook]
+payload = "generic"
+deny = { stderr = "{{ reason }}", exit = 2 }

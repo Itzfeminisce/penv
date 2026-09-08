@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use crate::ir::{Key, Schema};
+use crate::ir::{Key, Schema, quote};
 
 /// Write a schema back out canonically. Parsing the result yields an equal `Schema`.
 pub fn render(schema: &Schema) -> String {
@@ -61,8 +61,13 @@ fn render_key(out: &mut String, key: &Key) {
     if let Some(v) = &key.rotate {
         decorators.push(format!("@rotate={v}"));
     }
-    if let Some(v) = &key.dynamic {
-        decorators.push(format!("@dynamic={}", quote(v)));
+    match key.dynamic {
+        Some(true) => decorators.push("@dynamic".into()),
+        Some(false) => decorators.push("@static".into()),
+        None => {}
+    }
+    if let Some(v) = &key.dynamic_from {
+        decorators.push(format!("@dynamicFrom={}", quote(v)));
     }
 
     let _ = writeln!(out, "# {}", decorators.join(" "));
@@ -72,12 +77,4 @@ fn render_key(out: &mut String, key: &Key) {
         key.name,
         key.default.as_deref().map(quote).unwrap_or_default()
     );
-}
-
-fn quote(v: &str) -> String {
-    if v.is_empty() || v.contains([' ', '\t', '#', '"', '\'']) {
-        format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
-    } else {
-        v.to_string()
-    }
 }

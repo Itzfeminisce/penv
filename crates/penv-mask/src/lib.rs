@@ -10,6 +10,8 @@ pub const BLOCKS: &str = "\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}";
 
 const STANDARD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const URL_SAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
+const UPPER_HEX: &[u8; 16] = b"0123456789ABCDEF";
 
 /// What a matched secret is replaced with: enough to recognise which one it was,
 /// and nothing that helps use it.
@@ -21,6 +23,16 @@ pub fn redaction(secret: &str) -> String {
 struct Pattern {
     bytes: Vec<u8>,
     replacement: Vec<u8>,
+    /// Base64 arrives wrapped, so the line breaks inside a match are skipped.
+    wrapped: bool,
+}
+
+enum Hit {
+    /// A whole pattern matched, consuming this many bytes of the buffer.
+    Full(usize),
+    /// The buffer ran out part way through a pattern.
+    Partial,
+    None,
 }
 
 /// Masks a byte stream fed to it in arbitrary chunks.
@@ -40,13 +52,12 @@ impl Masker {
                 continue;
             }
             let replacement = redaction(secret).into_bytes();
-            for form in forms(secret) {
-                if form.len() >= MIN_SECRET_LEN
-                    && !patterns.iter().any(|p| p.bytes == form.as_bytes())
-                {
+            for (form, wrapped) in forms(secret) {
+                if !form.is_empty() && !patterns.iter().any(|p| p.bytes == form.as_bytes()) {
                     patterns.push(Pattern {
                         bytes: form.into_bytes(),
                         replacement: replacement.clone(),
+                        wrapped,
                     });
                 }
             }
@@ -72,16 +83,15 @@ impl Masker {
         self.patterns.is_empty()
     }
 
-    /// Scrub a chunk. Bytes that could still start a secret are held back until
-    /// the next chunk or `finish`.
+    /// Scrub a chunk. Only bytes that could still grow into a secret are held
+    /// back, so a prompt with no newline reaches the terminal at once.
     pub fn feed(&mut self, chunk: &[u8], out: &mut Vec<u8>) {
         if self.is_pass_through() {
             out.extend_from_slice(chunk);
             return;
         }
         self.held.extend_from_slice(chunk);
-        let limit = self.held.len().saturating_sub(self.longest - 1);
-        self.scan(limit, out);
+        self.scan(false, out);
     }
 
     /// Scrub what is held back and release it. The stream ends here.
@@ -89,53 +99,107 @@ impl Masker {
         if self.is_pass_through() {
             return;
         }
-        let limit = self.held.len();
-        self.scan(limit, out);
+        self.scan(true, out);
     }
 
-    fn scan(&mut self, limit: usize, out: &mut Vec<u8>) {
+    fn scan(&mut self, ending: bool, out: &mut Vec<u8>) {
+        // A wrapped match can span at most twice its pattern, so nothing before
+        // that window can still be waiting for more bytes.
+        let tail = self.held.len().saturating_sub(self.longest * 2);
         let mut index = 0;
         let mut run = 0;
-        while index < limit {
+        while index < self.held.len() {
+            // A longer pattern still waiting for bytes outranks a shorter one that
+            // already fits, so a partial stops the scan before any match is taken.
+            if !ending && index >= tail && self.partial_at(index) {
+                break;
+            }
             match self.match_at(index) {
-                Some(pattern) => {
+                (Some(pattern), consumed) => {
                     out.extend_from_slice(&self.held[run..index]);
                     out.extend_from_slice(&self.patterns[pattern].replacement);
-                    index += self.patterns[pattern].bytes.len();
+                    index += consumed;
                     run = index;
                 }
-                None => index += 1,
+                (None, _) => index += 1,
             }
         }
         out.extend_from_slice(&self.held[run..index]);
         self.held.drain(..index);
     }
 
-    /// The longest pattern that fits whole at this position.
-    fn match_at(&self, index: usize) -> Option<usize> {
+    /// The longest pattern that fits whole at this position, and what it ate.
+    fn match_at(&self, index: usize) -> (Option<usize>, usize) {
+        let rest = &self.held[index..];
+        for i in self.by_first_byte[rest[0] as usize]
+            .iter()
+            .map(|i| *i as usize)
+        {
+            if let Hit::Full(consumed) = compare(rest, &self.patterns[i]) {
+                return (Some(i), consumed);
+            }
+        }
+        (None, 0)
+    }
+
+    /// True when what is left could still be the start of a pattern.
+    fn partial_at(&self, index: usize) -> bool {
         let rest = &self.held[index..];
         self.by_first_byte[rest[0] as usize]
             .iter()
-            .map(|i| *i as usize)
-            .find(|i| rest.starts_with(&self.patterns[*i].bytes))
+            .any(|i| matches!(compare(rest, &self.patterns[*i as usize]), Hit::Partial))
     }
 }
 
+/// Match one pattern at the head of `hay`, stepping over the line breaks base64
+/// picks up in transit. A run of breaks longer than the pattern is not wrapping.
+fn compare(hay: &[u8], pattern: &Pattern) -> Hit {
+    let mut i = 0;
+    let mut matched = 0;
+    let mut skipped = 0;
+    while matched < pattern.bytes.len() {
+        if i >= hay.len() {
+            return Hit::Partial;
+        }
+        let byte = hay[i];
+        if pattern.wrapped && matched > 0 && (byte == b'\r' || byte == b'\n') {
+            skipped += 1;
+            if skipped > pattern.bytes.len() {
+                return Hit::None;
+            }
+            i += 1;
+            continue;
+        }
+        if byte != pattern.bytes[matched] {
+            return Hit::None;
+        }
+        i += 1;
+        matched += 1;
+    }
+    Hit::Full(i)
+}
+
 /// The shapes one secret can leave a process in: as written, base64 in both
-/// alphabets padded and not, and escaped as a JSON string body.
-fn forms(secret: &str) -> Vec<String> {
+/// alphabets at every phase a prefix can push it to, hex, percent-encoded and
+/// escaped as a JSON string body. The flag marks the forms that arrive wrapped.
+fn forms(secret: &str) -> Vec<(String, bool)> {
     let raw = secret.as_bytes();
     let mut out = vec![
-        secret.to_string(),
-        base64(raw, STANDARD, true),
-        base64(raw, STANDARD, false),
-        base64(raw, URL_SAFE, true),
-        base64(raw, URL_SAFE, false),
+        (secret.to_string(), false),
+        (base64(raw, STANDARD, true), true),
+        (base64(raw, STANDARD, false), true),
+        (base64(raw, URL_SAFE, true), true),
+        (base64(raw, URL_SAFE, false), true),
     ];
-    let escaped = json_escaped(secret);
-    if escaped != secret {
-        out.push(escaped);
+    for phase in 0..3 {
+        out.push((phased_base64(raw, STANDARD, phase), true));
+        out.push((phased_base64(raw, URL_SAFE, phase), true));
     }
+    out.push((hex(raw, LOWER_HEX), false));
+    out.push((hex(raw, UPPER_HEX), false));
+    out.push((percent(secret, UPPER_HEX), false));
+    out.push((percent(secret, LOWER_HEX), false));
+    out.push((json_escaped(secret), false));
     out
 }
 
@@ -160,6 +224,42 @@ fn base64(input: &[u8], alphabet: &[u8; 64], pad: bool) -> String {
             for _ in kept..4 {
                 out.push('=');
             }
+        }
+    }
+    out
+}
+
+/// The secret as it appears inside a larger base64 body, where a prefix has
+/// pushed it off the group boundary: the groups the neighbouring bytes cannot
+/// reach, so both the partial leading and the partial trailing group are dropped.
+fn phased_base64(input: &[u8], alphabet: &[u8; 64], phase: usize) -> String {
+    let mut padded = vec![b'X'; phase];
+    padded.extend_from_slice(input);
+    let whole = base64(&padded, alphabet, false);
+    let start = if phase == 0 { 0 } else { 4 };
+    let complete = (padded.len() / 3) * 4;
+    whole.get(start..complete).unwrap_or_default().to_string()
+}
+
+fn hex(input: &[u8], digits: &[u8; 16]) -> String {
+    let mut out = String::with_capacity(input.len() * 2);
+    for byte in input {
+        out.push(digits[(byte >> 4) as usize] as char);
+        out.push(digits[(byte & 15) as usize] as char);
+    }
+    out
+}
+
+/// `encodeURIComponent`, which leaves the unreserved set and `!'()*~` alone.
+fn percent(value: &str, digits: &[u8; 16]) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte) {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push(digits[(byte >> 4) as usize] as char);
+            out.push(digits[(byte & 15) as usize] as char);
         }
     }
     out

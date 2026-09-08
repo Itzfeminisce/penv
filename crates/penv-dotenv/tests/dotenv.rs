@@ -97,6 +97,12 @@ fn the_writer_refuses_what_the_subset_excludes() {
         })
     );
     assert!(write(&[("A_KEY", "both ' and \"")]).is_err());
+    assert_eq!(
+        write(&[("A_KEY", r"a \ and a '")]),
+        Err(WriteError::Unquotable {
+            key: "A_KEY".into()
+        })
+    );
 }
 
 #[test]
@@ -120,7 +126,12 @@ fn infers_types_from_values() {
     assert_eq!(ty("APP_URL"), BaseType::Url);
     assert_eq!(ty("PORT"), BaseType::Port);
     assert_eq!(ty("DEBUG"), BaseType::Boolean);
-    assert_eq!(ty("WORKERS"), BaseType::Integer);
+    assert_eq!(ty("WORKERS"), BaseType::Number);
+    assert_eq!(
+        schema.get("WORKERS").unwrap().ty.constraint("isInt"),
+        Some("true"),
+        "a whole number is number(isInt=true)"
+    );
     assert_eq!(ty("RATE"), BaseType::Number);
     assert_eq!(ty("OWNER_EMAIL"), BaseType::Email);
     assert_eq!(ty("APP_NAME"), BaseType::String);
@@ -131,29 +142,39 @@ fn infers_types_from_values() {
 }
 
 #[test]
-fn infers_sensitivity_by_name_and_by_value() {
-    let env = read(
-        "STRIPE_SECRET_KEY=sk_test_0000000000\nAPI_TOKEN=plain\nDB_PASSWORD=hunter2\nSENTRY_DSN=https://example.test/1\nSESSION_JWT=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYWtlIn0.c2lnbmF0dXJlZmFrZQ\nDATABASE_URL=postgres://someone:fakepassword@localhost:5432/app\nAPP_NAME=demo\nNEXT_PUBLIC_API_KEY=pk_public_fake\n",
-    );
+fn every_key_is_sensitive_unless_a_prefix_or_a_dull_value_says_otherwise() {
+    let env = read(concat!(
+        "STRIPE_SECRET_KEY=sk_test_0000000000
+",
+        "SESSION_JWT=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYWtlIn0.c2lnbmF0dXJlZmFrZQ
+",
+        "DATABASE_URL=postgres://someone:fakepassword@localhost:5432/app
+",
+        "APP_NAME=demo
+",
+        "NEXT_PUBLIC_API_KEY=pk_public_fake
+",
+    ));
     let schema = infer(&env);
     let sensitive = |name: &str| schema.get(name).unwrap().sensitive;
     assert!(sensitive("STRIPE_SECRET_KEY"));
-    assert!(sensitive("API_TOKEN"));
-    assert!(sensitive("DB_PASSWORD"));
-    assert!(sensitive("SENTRY_DSN"));
-    assert!(sensitive("SESSION_JWT"), "a JWT value reads as a secret");
+    assert!(sensitive("SESSION_JWT"));
     assert!(
         sensitive("DATABASE_URL"),
-        "a connection string carrying a password is a secret"
+        "a connection string is never copied, however it is spelled"
     );
-    assert!(
-        sensitive("DATABASE_URL"),
-        "a connection string carrying a password is a secret"
-    );
-    assert!(!sensitive("APP_NAME"));
+    assert!(!sensitive("APP_NAME"), "a lowercase word is not a secret");
     assert!(
         !sensitive("NEXT_PUBLIC_API_KEY"),
-        "a bundler prefix beats the name pattern"
+        "a bundler prefix ships the value to the browser anyway"
+    );
+    assert_eq!(
+        schema
+            .get("NEXT_PUBLIC_API_KEY")
+            .unwrap()
+            .sensitive_decorator,
+        None,
+        "the prefix rule needs no decorator"
     );
 }
 
@@ -205,4 +226,105 @@ fn the_gitignore_helper_is_idempotent() {
 fn the_gitignore_helper_adds_only_what_is_missing() {
     let update = ensure_ignored("/.env\ndist/\n");
     assert_eq!(update.added, [".env.*", "!.env.schema"]);
+}
+
+#[test]
+fn awkward_values_round_trip_through_the_writer() {
+    let values = [
+        "plain",
+        "one two",
+        "has#hash",
+        r"back\slash",
+        r"C:\Users\dev\app",
+        r"back\slash and a space",
+        "quote\"inside",
+        "apostrophe'inside",
+        "trailing space ",
+        "=equals=",
+        "",
+    ];
+    for value in values {
+        let text = write(&[("A_KEY", value)]).unwrap_or_else(|e| panic!("{value:?}: {e}"));
+        let env = read(&text);
+        assert_eq!(env.get("A_KEY"), Some(value), "wrote {text:?}");
+        assert!(env.warnings.is_empty(), "{value:?}: {:?}", env.warnings);
+    }
+}
+
+#[test]
+fn only_a_dull_value_is_copied_into_the_committed_schema() {
+    let env = read(concat!(
+        "SLACK_WEBHOOK_URL=https://hooks.slack.test/services/T00/B00/xoxbFAKETOKEN\n",
+        "DATABASE_URL=postgres://app.example.test/db?password=hunter2\n",
+        "SESSION_SEED=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+        "ADMIN_PW=hunter2\n",
+        "NODE_ENV=development\n",
+        "PORT=3000\n",
+        "NEXT_PUBLIC_APP_URL=https://example.test/x?y=1\n",
+        "DEBUG=true\n",
+        "API_URL=http://localhost:3000\n",
+    ));
+    let schema = infer(&env);
+    let default = |name: &str| schema.get(name).unwrap().default.clone();
+    let sensitive = |name: &str| schema.get(name).unwrap().sensitive;
+    let required = |name: &str| schema.get(name).unwrap().required;
+
+    for kept in [
+        "SLACK_WEBHOOK_URL",
+        "DATABASE_URL",
+        "SESSION_SEED",
+        "ADMIN_PW",
+    ] {
+        assert_eq!(
+            default(kept),
+            None,
+            "{kept} carried its value into the schema"
+        );
+        assert!(sensitive(kept), "{kept} is not sensitive");
+        assert!(required(kept), "{kept} is not required");
+    }
+    for copied in [
+        "NODE_ENV",
+        "PORT",
+        "NEXT_PUBLIC_APP_URL",
+        "DEBUG",
+        "API_URL",
+    ] {
+        assert!(default(copied).is_some(), "{copied} lost its value");
+        assert!(!sensitive(copied), "{copied} is sensitive but was copied");
+        assert!(
+            !required(copied),
+            "{copied} has a default, so it is optional"
+        );
+    }
+
+    let rendered = render(&schema);
+    for secret in ["xoxbFAKETOKEN", "hunter2", "0123456789abcdef"] {
+        assert!(!rendered.contains(secret), "{secret} reached the schema");
+    }
+    assert!(rendered.contains("NEXT_PUBLIC_APP_URL=https://example.test/x?y=1"));
+    assert_eq!(penv_schema::parse(&rendered).unwrap(), schema);
+}
+
+#[test]
+fn types_are_inferred_even_when_the_value_stays_out() {
+    let env = read(concat!(
+        "DATABASE_URL=postgres://app.example.test/db?password=hunter2\n",
+        "SMTP_PORT=2525\n",
+        "OWNER_EMAIL=dev@example.test\n",
+        "RETRY_BUDGET=7\n",
+        "SAMPLE_RATE=0.25\n",
+    ));
+    let schema = infer(&env);
+    let ty = |name: &str| schema.get(name).unwrap().ty.clone();
+    assert_eq!(ty("DATABASE_URL").base, BaseType::Url);
+    assert_eq!(ty("SMTP_PORT").base, BaseType::Port);
+    assert_eq!(ty("OWNER_EMAIL").base, BaseType::Email);
+    assert_eq!(ty("RETRY_BUDGET").constraint("isInt"), Some("true"));
+    assert_eq!(ty("SAMPLE_RATE").base, BaseType::Number);
+    assert_eq!(
+        schema.get("DATABASE_URL").unwrap().default,
+        None,
+        "the type came from the value, the value stayed out"
+    );
 }

@@ -41,16 +41,14 @@ pub fn run(
     }
 }
 
-/// Every built-in target the repository asks for, written. `init` calls this;
-/// a target that fails to render is skipped rather than failing the import.
+/// Every target the repository asks for, written, whether it is built in or a
+/// folder someone dropped in. `init` calls this; a target that fails to render is
+/// skipped rather than failing the import.
 pub fn auto(dir: &Path, schema: &Schema) -> Vec<PathBuf> {
     let roots = roots(dir);
     let json = schema.to_json();
     let mut written = Vec::new();
-    for built_in in penv_targets::BUILT_IN {
-        let Ok(target) = penv_targets::load(&Disk, &roots, built_in.name) else {
-            continue;
-        };
+    for target in penv_targets::available(&Disk, &roots) {
         if !penv_targets::detected(&Disk, &roots, &target) {
             continue;
         }
@@ -191,78 +189,65 @@ fn verify(out: &Output, target: &Target, path: &Path, rendered: &str) -> Result<
     })
 }
 
-/// Compile what was rendered, when the toolchain is there. A missing toolchain
-/// is a skip: `gen --check` is not a reason to install one.
+/// Run the target's own `[check]` command over what was rendered. A missing
+/// toolchain is a skip: `gen --check` is not a reason to install one.
 fn compile(target: &Target, rendered: &str) -> Value {
-    let (tool, run) = match target.name.as_str() {
-        "ts" => ("tsc", typescript as fn(&str, &Path) -> Result<(), String>),
-        "py" => ("python3", python as fn(&str, &Path) -> Result<(), String>),
-        _ => {
-            return json!({ "tool": null, "status": "skipped", "detail": "no compiler for this target" });
-        }
+    let Some(check) = &target.check else {
+        return json!({ "tool": null, "status": "skipped", "detail": "this target declares no [check] command" });
     };
-    let Some(exe) = runnable(tool) else {
+    let Some(tool) = check.command.first() else {
+        return json!({ "tool": null, "status": "skipped", "detail": "this target declares no [check] command" });
+    };
+    if !probed(&check.probe) {
         return json!({
             "tool": tool,
             "status": "skipped",
-            "detail": format!("{tool} is not on PATH"),
+            "detail": format!("{} is not on PATH", check.probe.first().unwrap_or(tool)),
         });
-    };
+    }
 
     let dir = std::env::temp_dir().join(format!("penv-gen-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     if std::fs::create_dir_all(&dir).is_err() {
         return json!({ "tool": tool, "status": "skipped", "detail": "no writable temp directory" });
     }
-    let outcome = std::fs::write(dir.join(source_name(target)), rendered)
-        .map_err(|e| e.to_string())
-        .and_then(|()| run(&exe, &dir));
+    let file = source_name(target);
+    let outcome = write_all(&dir, check, &file, rendered).and_then(|()| {
+        let arguments: Vec<String> = check.command[1..]
+            .iter()
+            .map(|argument| argument.replace("{file}", &file))
+            .collect();
+        output(Command::new(tool).current_dir(&dir).args(arguments))
+    });
     let _ = std::fs::remove_dir_all(&dir);
 
     match outcome {
         Ok(()) => {
-            json!({ "tool": tool, "status": "ok", "detail": format!("{exe} accepted the output") })
+            json!({ "tool": tool, "status": "ok", "detail": format!("{tool} accepted the output") })
         }
         Err(detail) => json!({ "tool": tool, "status": "failed", "detail": detail }),
     }
 }
 
-fn source_name(target: &Target) -> &'static str {
-    match target.name.as_str() {
-        "py" => "penv_env.py",
-        _ => "env.ts",
+fn write_all(
+    dir: &Path,
+    check: &penv_targets::Check,
+    file: &str,
+    rendered: &str,
+) -> Result<(), String> {
+    std::fs::write(dir.join(file), rendered).map_err(|e| e.to_string())?;
+    for (name, body) in &check.files {
+        std::fs::write(dir.join(name), body).map_err(|e| e.to_string())?;
     }
+    Ok(())
 }
 
-fn typescript(exe: &str, dir: &Path) -> Result<(), String> {
-    // The generated file is a module, so this shim shadows the global rather
-    // than fighting whatever @types/node the repository has.
-    std::fs::write(
-        dir.join("penv-globals.d.ts"),
-        "declare const process: { env: Record<string, string | undefined> };\n",
-    )
-    .map_err(|e| e.to_string())?;
-    output(Command::new(exe).current_dir(dir).args([
-        "--noEmit",
-        "--strict",
-        "--skipLibCheck",
-        "--target",
-        "es2020",
-        "--module",
-        "esnext",
-        "--moduleResolution",
-        "bundler",
-        "env.ts",
-        "penv-globals.d.ts",
-    ]))
-}
-
-fn python(exe: &str, dir: &Path) -> Result<(), String> {
-    output(
-        Command::new(exe)
-            .current_dir(dir)
-            .args(["-m", "py_compile", "penv_env.py"]),
-    )
+/// The name the check command compiles, taken from where the target writes.
+fn source_name(target: &Target) -> String {
+    Path::new(&target.output)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| target.output.clone())
 }
 
 fn output(command: &mut Command) -> Result<(), String> {
@@ -281,19 +266,14 @@ fn output(command: &mut Command) -> Result<(), String> {
     }
 }
 
-/// The first name that answers `--version`, so a shim that only prints an
-/// install prompt counts as absent.
-fn runnable(tool: &str) -> Option<String> {
-    let candidates: &[&str] = match tool {
-        "python3" => &["python3", "python", "py"],
-        other => &[other],
+/// The target's probe has to answer, so a shim that only prints an install
+/// prompt counts as absent. No probe means the command speaks for itself.
+fn probed(probe: &[String]) -> bool {
+    let Some(tool) = probe.first() else {
+        return true;
     };
-    candidates.iter().find_map(|name| {
-        Command::new(name)
-            .arg("--version")
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .map(|_| name.to_string())
-    })
+    Command::new(tool)
+        .args(&probe[1..])
+        .output()
+        .is_ok_and(|out| out.status.success())
 }

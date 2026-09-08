@@ -1,5 +1,5 @@
 {
   "permissions": {
-    "deny": [{% for file in env_files %}{{ ("Read(" ~ file ~ ")") | quote }}{% if not loop.last %}, {% endif %}{% endfor %}]
+    "deny": ["Read(.env)", "Read(.env.*)"]
   }
 }

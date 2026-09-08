@@ -1,40 +1,16 @@
+use penv_targets::folder::{self, BuiltIn};
+
 use crate::error::Error;
 use crate::guard::{Guard, parse};
 
-/// Reading a tree of folders, so the loader is a pure function over one.
-pub trait Tree {
-    fn read(&self, path: &str) -> Option<String>;
-    /// Names of the directories directly under `path`.
-    fn dirs(&self, path: &str) -> Vec<String>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Roots {
-    pub repo: String,
-    pub home: Option<String>,
-}
-
-impl Roots {
-    pub fn new(repo: impl Into<String>, home: Option<String>) -> Roots {
-        Roots {
-            repo: repo.into(),
-            home,
-        }
-    }
-}
-
-pub struct BuiltIn {
-    pub name: &'static str,
-    pub config: &'static str,
-    pub templates: &'static [(&'static str, &'static str)],
-}
+pub use penv_targets::folder::{Roots, Tree};
 
 macro_rules! built_in {
     ($name:literal, [$($template:literal),* $(,)?]) => {
         BuiltIn {
             name: $name,
-            config: include_str!(concat!("../guards/", $name, "/guard.toml")),
-            templates: &[
+            files: &[
+                ("guard.toml", include_str!(concat!("../guards/", $name, "/guard.toml"))),
                 $(($template, include_str!(concat!("../guards/", $name, "/", $template)))),*
             ],
         }
@@ -56,66 +32,26 @@ pub const BUILT_IN: &[BuiltIn] = &[
     built_in!("windsurf", ["hooks.json.tmpl"]),
 ];
 
-fn folders(roots: &Roots, name: &str) -> Vec<String> {
-    let mut out = vec![format!("{}/.penv/guards/{name}", roots.repo)];
-    if let Some(home) = &roots.home {
-        out.push(format!("{home}/.penv/guards/{name}"));
-    }
-    out
-}
-
 /// Repo folder, then home folder, then built in. The first found wins.
 pub fn load(tree: &dyn Tree, roots: &Roots, name: &str) -> Result<Guard, Error> {
-    let mut looked = Vec::new();
-    for dir in folders(roots, name) {
-        looked.push(dir.clone());
-        let Some(config) = tree.read(&format!("{dir}/guard.toml")) else {
-            continue;
-        };
-        return parse(
-            name,
-            &config,
-            &|template| tree.read(&format!("{dir}/{template}")),
-            &dir,
-        );
-    }
-
-    looked.push("built in".into());
-    match BUILT_IN.iter().find(|b| b.name == name) {
-        Some(b) => parse(
-            name,
-            b.config,
-            &|template| {
-                b.templates
-                    .iter()
-                    .find(|(n, _)| *n == template)
-                    .map(|(_, body)| (*body).to_string())
-            },
-            "built in",
-        ),
-        None => Err(Error::NotFound {
-            name: name.to_string(),
-            looked,
-        }),
-    }
+    let found =
+        folder::find(tree, roots, "guards", "guard.toml", BUILT_IN, name).map_err(|looked| {
+            Error::NotFound {
+                name: name.to_string(),
+                looked,
+            }
+        })?;
+    let config = found.file("guard.toml").ok_or_else(|| Error::Malformed {
+        dir: found.dir.clone(),
+        message: "no guard.toml".into(),
+    })?;
+    parse(name, &config, &|template| found.file(template), &found.dir)
 }
 
 /// Every guard that can be loaded: the ranked built-in list first, then whatever
 /// the two `.penv` folders add.
 pub fn available(tree: &dyn Tree, roots: &Roots) -> Vec<Guard> {
-    let mut names: Vec<String> = BUILT_IN.iter().map(|b| b.name.to_string()).collect();
-    let mut dirs = vec![format!("{}/.penv/guards", roots.repo)];
-    if let Some(home) = &roots.home {
-        dirs.push(format!("{home}/.penv/guards"));
-    }
-    for dir in dirs {
-        for name in tree.dirs(&dir) {
-            if !names.contains(&name) {
-                names.push(name);
-            }
-        }
-    }
-    names
+    folder::names(tree, roots, "guards", BUILT_IN)
         .iter()
         .filter_map(|name| load(tree, roots, name).ok())
         .collect()
@@ -124,7 +60,7 @@ pub fn available(tree: &dyn Tree, roots: &Roots) -> Vec<Guard> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::guard::{Format, Merge, Scope};
+    use crate::guard::{Format, Merge, Payload, Scope};
     use std::collections::BTreeMap;
 
     #[derive(Default)]
@@ -218,12 +154,27 @@ template = "settings.json.tmpl"
     }
 
     #[test]
-    fn codex_merges_toml_and_cline_appends_a_script_line() {
+    fn codex_merges_toml_and_cline_execs_the_binary_from_a_script() {
         let codex = load(&Fake::default(), &roots(), "codex").unwrap();
         assert_eq!(codex.writes[0].format, Format::Toml);
         assert_eq!(codex.writes[0].merge, Merge::AppendUnique);
         let cline = load(&Fake::default(), &roots(), "cline").unwrap();
         assert_eq!(cline.writes[0].format, Format::Text);
         assert_eq!(cline.writes[0].path, ".clinerules/hooks/PreToolUse");
+        assert!(
+            cline.writes[0].executable,
+            "a hook script that is not executable fails open"
+        );
+    }
+
+    #[test]
+    fn every_built_in_guard_declares_the_hook_shape_it_answers_in() {
+        for name in BUILT_IN.iter().map(|b| b.name) {
+            let guard = load(&Fake::default(), &roots(), name).unwrap();
+            let hook = guard.hook.unwrap_or_else(|| panic!("{name} has no [hook]"));
+            assert!(hook.deny.stdout.is_some() || hook.deny.stderr.is_some());
+        }
+        let cursor = load(&Fake::default(), &roots(), "cursor").unwrap();
+        assert_eq!(cursor.hook.unwrap().payload, Payload::Cursor);
     }
 }

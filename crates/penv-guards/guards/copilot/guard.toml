@@ -9,3 +9,7 @@ path = ".github/copilot/permissions-config.json"
 format = "json"
 merge = "deny-union"
 template = "permissions-config.json.tmpl"
+
+[hook]
+payload = "generic"
+deny = { stderr = "{{ reason }}", exit = 2 }

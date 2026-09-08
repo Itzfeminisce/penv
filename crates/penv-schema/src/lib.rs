@@ -12,5 +12,5 @@ pub use ir::{
 pub use parse::parse;
 pub use render::render;
 pub use validate::{
-    Values, Violation, is_absolute_url, is_email, parse_boolean, validate, validate_key,
+    Values, Violation, extras, is_absolute_url, is_email, parse_boolean, validate, validate_key,
 };

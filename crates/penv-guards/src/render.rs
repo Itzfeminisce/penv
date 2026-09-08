@@ -1,12 +1,13 @@
+use minijinja::context;
 use minijinja::value::Value as Jinja;
-use minijinja::{AutoEscape, Environment, UndefinedBehavior};
+use penv_targets::folder::{describe, environment};
 use serde_json::{Value, json};
 
 use crate::error::Error;
-use crate::guard::{ENV_FILES, Guard, Write};
+use crate::guard::{Guard, Hook, Write};
 
-/// A guard template sees the schema JSON, `penv.version` and `env_files`. Key
-/// names are all a harness needs; values never enter the context.
+/// A guard template sees the schema JSON and `penv.version`. Key names are all a
+/// harness needs; values never enter the context.
 pub fn render(
     guard: &Guard,
     write: &Write,
@@ -15,39 +16,29 @@ pub fn render(
 ) -> Result<String, Error> {
     let mut context = schema.clone();
     context["penv"] = json!({ "version": penv_version });
-    context["env_files"] = json!(ENV_FILES);
 
     environment()
         .render_str(&write.body, Jinja::from_serialize(&context))
         .map_err(|e| Error::Render {
             guard: guard.name.clone(),
-            message: match e.detail() {
-                Some(detail) => format!("{}: {e}: {detail}", write.template),
-                None => format!("{}: {e}", write.template),
-            },
+            message: format!("{}: {}", write.template, describe(&e)),
         })
 }
 
-fn environment() -> Environment<'static> {
-    let mut env = Environment::new();
-    env.set_undefined_behavior(UndefinedBehavior::Strict);
-    env.set_auto_escape_callback(|_| AutoEscape::None);
-    env.add_filter("quote", quote);
-    env.add_filter("json", to_json);
-    env
-}
-
-fn quote(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| format!("\"{value}\""))
-}
-
-fn to_json(value: Jinja) -> Result<String, minijinja::Error> {
-    serde_json::to_string(&value).map_err(|e| {
-        minijinja::Error::new(
-            minijinja::ErrorKind::InvalidOperation,
-            format!("value cannot be written as JSON: {e}"),
-        )
-    })
+/// The refusal, in the shape the harness's folder declares, over `reason`.
+pub fn deny(name: &str, hook: &Hook, reason: &str) -> Result<String, Error> {
+    let body = hook
+        .deny
+        .stdout
+        .as_deref()
+        .or(hook.deny.stderr.as_deref())
+        .unwrap_or("{{ reason }}");
+    environment()
+        .render_str(body, context! { reason })
+        .map_err(|e| Error::Render {
+            guard: name.to_string(),
+            message: format!("the [hook] deny template: {}", describe(&e)),
+        })
 }
 
 #[cfg(test)]
@@ -131,20 +122,83 @@ mod tests {
     }
 
     #[test]
-    fn the_deny_list_names_the_env_files_and_leaves_the_schema_readable() {
-        let out = rendered("claude-code", 0);
-        assert!(out.contains("Read(./.env)"));
-        assert!(out.contains("Read(./.env.production)"));
-        assert!(!out.contains(".env.schema"));
-        assert!(!out.contains(".env.*"), "a glob would catch .env.schema");
+    fn the_deny_patterns_are_the_two_the_design_names_and_never_a_list() {
+        let claude: Value = serde_json::from_str(&rendered("claude-code", 0)).unwrap();
+        assert_eq!(
+            claude["permissions"]["deny"],
+            json!(["Read(./.env)", "Read(./.env.*)"])
+        );
+        assert_eq!(
+            claude["sandbox"]["filesystem"]["denyRead"],
+            json!(["./.env", "./.env.*"])
+        );
+        let cursor: Value = serde_json::from_str(&rendered("cursor", 0)).unwrap();
+        assert_eq!(
+            cursor["permissions"]["deny"],
+            json!(["Read(.env)", "Read(.env.*)"])
+        );
+        let codex: toml::Value = toml::from_str(&rendered("codex", 0)).unwrap();
+        assert_eq!(
+            codex["sandbox_workspace_write"]["deny_read"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        for name in ["claude-code", "cursor", "codex", "copilot"] {
+            let out = rendered(name, 0);
+            assert!(!out.contains(".env.local"), "{name} enumerates filenames");
+            assert!(!out.contains(".env.schema"), "{name} names the schema");
+        }
     }
 
     #[test]
-    fn the_claude_code_hook_runs_the_binary_itself() {
+    fn the_claude_code_hook_runs_the_binary_itself_for_every_tool() {
         let out: Value = serde_json::from_str(&rendered("claude-code", 0)).unwrap();
         let hook = &out["hooks"]["PreToolUse"][0];
-        assert_eq!(hook["matcher"], "Bash");
+        assert_eq!(hook["matcher"], ".*");
         assert_eq!(hook["hooks"][0]["command"], "penv hook claude-code");
+    }
+
+    #[test]
+    fn the_cursor_hook_covers_a_shell_call_as_well_as_a_read() {
+        let out: Value = serde_json::from_str(&rendered("cursor", 1)).unwrap();
+        for event in ["beforeReadFile", "beforeShellExecution"] {
+            let entry = &out["hooks"][event][0];
+            assert_eq!(entry["command"], "penv hook cursor", "{event}");
+            assert_eq!(entry["failClosed"], json!(true), "{event}");
+        }
+    }
+
+    #[test]
+    fn the_cursor_refusal_carries_the_reason_under_both_spellings() {
+        let guard = guard("cursor");
+        let out: Value =
+            serde_json::from_str(&deny("cursor", &guard.hook.unwrap(), "no").unwrap()).unwrap();
+        assert_eq!(out["permission"], "deny");
+        assert_eq!(out["userMessage"], "no");
+        assert_eq!(out["user_message"], "no");
+    }
+
+    #[test]
+    fn a_harness_with_no_folder_answers_on_stderr_with_the_refusal_code() {
+        let hook = crate::Hook::generic();
+        assert_eq!(hook.deny.exit, 2);
+        assert_eq!(
+            deny("nano", &hook, "no reading .env").unwrap(),
+            "no reading .env"
+        );
+    }
+
+    #[test]
+    fn a_deny_template_quotes_a_reason_that_would_break_the_json() {
+        let guard = guard("claude-code");
+        let rendered = deny("claude-code", &guard.hook.unwrap(), "a \"quoted\" reason").unwrap();
+        let out: Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+            "a \"quoted\" reason"
+        );
     }
 
     #[test]

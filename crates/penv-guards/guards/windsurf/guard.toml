@@ -10,3 +10,7 @@ format = "json"
 merge = "deny-union"
 union = ["pre_run_command", "pre_read_code"]
 template = "hooks.json.tmpl"
+
+[hook]
+payload = "generic"
+deny = { stderr = "{{ reason }}", exit = 2 }

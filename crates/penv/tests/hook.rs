@@ -4,6 +4,7 @@
 use penv::commands::hook::{
     DUMPS_ENV, Decision, READS_ENV, REVEALS_VALUE, Request, decide, extract,
 };
+use penv_guards::Payload;
 
 fn on(command: &str) -> Decision {
     decide(&Request::command(command))
@@ -33,6 +34,34 @@ fn reading_a_value_file_is_refused() {
         "echo hi > .env",
     ] {
         denied(command, READS_ENV);
+    }
+}
+
+#[test]
+fn a_glob_that_could_name_a_value_file_counts_as_naming_it() {
+    for command in [
+        "cat .env*",
+        "cat .en?",
+        "cat *.env",
+        "cat .e*",
+        "grep -r sk_ .env.*",
+        "rg key apps/api/.env*",
+        "cat .[e]nv",
+    ] {
+        denied(command, READS_ENV);
+    }
+}
+
+#[test]
+fn a_glob_that_names_nothing_of_ours_is_left_alone() {
+    for command in [
+        "ls *",
+        "rm -rf build/*",
+        "prettier --write src/**/*.ts",
+        "cat .env.schema",
+        "cat *.json",
+    ] {
+        allowed(command);
     }
 }
 
@@ -69,6 +98,38 @@ fn dumping_the_environment_is_refused() {
         "python3 -c \"import os; print(os.environ)\"",
     ] {
         denied(command, DUMPS_ENV);
+    }
+}
+
+/// A shell handed a command is that command; without this, every matcher above
+/// reads only the word `bash`.
+#[test]
+fn a_shell_running_something_else_is_decided_on_what_it_runs() {
+    for (command, reason) in [
+        ("bash -c printenv", DUMPS_ENV),
+        ("sh -c \"printenv\"", DUMPS_ENV),
+        ("pwsh -Command Get-ChildItem Env:", DUMPS_ENV),
+        ("powershell -Command \"gci env:\"", DUMPS_ENV),
+        ("cmd /c type .env", READS_ENV),
+        ("cmd.exe /C \"type .env.local\"", READS_ENV),
+        ("/bin/sh -c \"cat .env\"", READS_ENV),
+        ("zsh -c \"penv reveal STRIPE_SECRET_KEY\"", REVEALS_VALUE),
+        ("bash -c \"sh -c printenv\"", DUMPS_ENV),
+    ] {
+        denied(command, reason);
+    }
+}
+
+#[test]
+fn a_shell_running_an_ordinary_command_still_runs_it() {
+    for command in [
+        "bash -c \"npm run build\"",
+        "sh -c 'echo hi'",
+        "cmd /c dir src",
+        "bash",
+        "pwsh -Command",
+    ] {
+        allowed(command);
     }
 }
 
@@ -117,34 +178,75 @@ fn one_refusal_in_a_chain_refuses_the_chain() {
 
 #[test]
 fn the_claude_code_payload_reaches_the_matcher() {
-    let request = extract(r#"{"tool_name":"Bash","tool_input":{"command":"cat .env"}}"#);
+    let request = extract(
+        Payload::ClaudeCode,
+        r#"{"tool_name":"Bash","tool_input":{"command":"cat .env"}}"#,
+    );
     assert_eq!(request.command.as_deref(), Some("cat .env"));
     assert_eq!(decide(&request), Decision::Deny(READS_ENV));
 }
 
+/// The matcher is `.*`, so Read, Grep and Glob arrive here too and each names
+/// what it is about to touch in its own field.
 #[test]
-fn the_cursor_payload_reaches_the_matcher() {
-    let request = extract(r#"{"hook_event_name":"beforeReadFile","file_path":"/repo/.env"}"#);
-    assert_eq!(request.path.as_deref(), Some("/repo/.env"));
-    assert_eq!(decide(&request), Decision::Deny(READS_ENV));
+fn every_claude_code_tool_shape_names_what_it_touches() {
+    for payload in [
+        r#"{"tool_name":"Read","tool_input":{"file_path":"/repo/.env"}}"#,
+        r#"{"tool_name":"Grep","tool_input":{"pattern":"sk_","path":"/repo/.env"}}"#,
+        r#"{"tool_name":"Glob","tool_input":{"pattern":".env*"}}"#,
+        r#"{"tool_name":"mcp__files__read","tool_input":{"path":"apps/api/.env.local"}}"#,
+        r#"{"tool_name":"Bash","tool_input":{"command":"bash -c printenv"}}"#,
+    ] {
+        assert!(
+            matches!(
+                decide(&extract(Payload::ClaudeCode, payload)),
+                Decision::Deny(_)
+            ),
+            "{payload}"
+        );
+    }
+    assert_eq!(
+        decide(&extract(
+            Payload::ClaudeCode,
+            r#"{"tool_name":"Read","tool_input":{"file_path":"/repo/.env.schema"}}"#
+        )),
+        Decision::Allow
+    );
+}
+
+#[test]
+fn the_cursor_payload_reaches_the_matcher_for_a_read_and_for_a_shell_call() {
+    let read = extract(
+        Payload::Cursor,
+        r#"{"hook_event_name":"beforeReadFile","file_path":"/repo/.env"}"#,
+    );
+    assert_eq!(read.path.as_deref(), Some("/repo/.env"));
+    assert_eq!(decide(&read), Decision::Deny(READS_ENV));
+
+    let shell = extract(
+        Payload::Cursor,
+        r#"{"hook_event_name":"beforeShellExecution","command":"printenv"}"#,
+    );
+    assert_eq!(shell.command.as_deref(), Some("printenv"));
+    assert_eq!(decide(&shell), Decision::Deny(DUMPS_ENV));
 }
 
 #[test]
 fn an_undocumented_payload_is_read_for_what_it_has() {
     assert_eq!(
-        decide(&extract(r#"{"args":{"cmd":"printenv"}}"#)),
+        decide(&extract(Payload::Generic, r#"{"args":{"cmd":"printenv"}}"#)),
         Decision::Deny(DUMPS_ENV)
     );
     assert_eq!(
-        decide(&extract("cat .env")),
+        decide(&extract(Payload::Generic, "cat .env")),
         Decision::Deny(READS_ENV),
         "plain text falls back to the command"
     );
-    assert_eq!(decide(&extract("")), Decision::Allow);
+    assert_eq!(decide(&extract(Payload::Generic, "")), Decision::Allow);
     assert_eq!(
-        decide(&extract("{not json")),
-        Decision::Allow,
-        "a payload with nothing to match on is allowed, not blocked"
+        decide(&extract(Payload::Generic, "{not json but cat .env")),
+        Decision::Deny(READS_ENV),
+        "a payload that will not parse is still read for what it names"
     );
 }
 
@@ -156,7 +258,6 @@ fn the_known_evasions_are_known() {
     for command in [
         "echo Y2F0IC5lbnYK | base64 -d | sh",
         "n=env; cat \".$n\"",
-        "cat .e*",
         "python3 -c \"print(open('.en' + 'v').read())\"",
         "node -e \"console.log(require('fs').readFileSync('.env','utf8'))\"",
     ] {

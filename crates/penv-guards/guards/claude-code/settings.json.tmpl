@@ -1,16 +1,16 @@
 {
   "permissions": {
-    "deny": [{% for file in env_files %}{{ ("Read(./" ~ file ~ ")") | quote }}{% if not loop.last %}, {% endif %}{% endfor %}]
+    "deny": ["Read(./.env)", "Read(./.env.*)"]
   },
   "sandbox": {
     "filesystem": {
-      "denyRead": [{% for file in env_files %}{{ ("./" ~ file) | quote }}{% if not loop.last %}, {% endif %}{% endfor %}]
+      "denyRead": ["./.env", "./.env.*"]
     }
   },
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": ".*",
         "hooks": [{ "type": "command", "command": "penv hook claude-code" }]
       }
     ]

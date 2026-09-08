@@ -46,7 +46,7 @@ pub fn dispatch(cli: &Cli, out: &Output, cwd: &Path, env: &Env) -> Result<Report
             all,
             check,
         }) => guard::run(out, cwd, *check, *all, harness),
-        Some(Command::Hook { harness }) => hook::run(harness),
+        Some(Command::Hook { harness }) => hook::run(harness, cwd),
         Some(Command::Schema) => schema(cwd),
         Some(Command::Help { command }) => help(command.as_deref()),
         Some(other) => Err(CliError::not_in_this_build(&path_of(other))),

@@ -14,7 +14,9 @@ pub enum WriteError {
     MultiLine { key: String },
     #[error("{key} contains a $. penv never expands values, so store the expanded value instead.")]
     Interpolation { key: String },
-    #[error("{key} contains both quote characters, so it cannot be quoted without escapes.")]
+    #[error(
+        "{key} mixes quote characters with a backslash, so it cannot be written without escapes."
+    )]
     Unquotable { key: String },
 }
 
@@ -53,14 +55,19 @@ pub fn write(entries: &[(&str, &str)]) -> Result<String, WriteError> {
 fn quote(key: &str, value: &str) -> Result<String, WriteError> {
     let double = value.contains('"');
     let single = value.contains('\'');
-    let needs = value.contains([' ', '\t', '#']) || double || single;
-    if !needs {
-        return Ok(value.to_string());
-    }
-    if double && single {
+    // Every parser in the research leaves a single-quoted value alone, so a
+    // backslash survives only in single quotes.
+    let backslash = value.contains('\\');
+    if single && (double || backslash) {
         return Err(WriteError::Unquotable {
             key: key.to_string(),
         });
+    }
+    if backslash {
+        return Ok(format!("'{value}'"));
+    }
+    if !(value.contains([' ', '\t', '#']) || double || single) {
+        return Ok(value.to_string());
     }
     if double {
         Ok(format!("'{value}'"))

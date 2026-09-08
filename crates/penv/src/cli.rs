@@ -1,4 +1,12 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+/// What stdout carries. Every format that could print a raw value conflicts with
+/// `--agent`; today only `text` can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Format {
+    Json,
+    Text,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -12,12 +20,35 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// Pick the output format: json or text
+    #[arg(long, global = true, value_enum, value_name = "FORMAT")]
+    pub format: Option<Format>,
+
     /// Treat this session as an agent: JSON out, values masked
     #[arg(long, global = true)]
     pub agent: bool,
 
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+impl Cli {
+    /// clap conflicts on flags, not on one value of one flag, so the pair that
+    /// cannot hold is refused here with clap's own parse error.
+    pub fn parse_checked() -> Cli {
+        use clap::{CommandFactory, error::ErrorKind};
+
+        let cli = Cli::parse();
+        if cli.agent && cli.format == Some(Format::Text) {
+            Cli::command()
+                .error(
+                    ErrorKind::ArgumentConflict,
+                    "--agent emits JSON, so it cannot be combined with --format text.",
+                )
+                .exit();
+        }
+        cli
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -140,7 +171,7 @@ pub enum Command {
         shell: String,
     },
 
-    /// Run as a harness hook
+    /// Run as a harness hook; a payload it cannot read is refused
     Hook {
         /// The harness, such as claude-code
         harness: String,

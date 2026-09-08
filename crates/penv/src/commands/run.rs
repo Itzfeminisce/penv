@@ -5,7 +5,7 @@ use std::thread::JoinHandle;
 
 use penv_agent::Policy;
 use penv_mask::Masker;
-use penv_schema::{Schema, Values, validate};
+use penv_schema::{Schema, Values, extras, validate};
 
 use crate::agent::detect_here;
 use crate::env::Env;
@@ -91,24 +91,35 @@ pub fn run(
             &[],
             &violations,
             &[],
+            &[],
         );
         return Ok(Report::new(body, text).with_exit(Exit::Validation));
     }
 
-    let detection = detect_here(process_env, std::io::stdout().is_terminal());
+    let stdout_tty = std::io::stdout().is_terminal();
+    let detection = detect_here(process_env, stdout_tty);
     let agent = detection.is_agent() || agent_flag;
     let policy = Policy::for_(&detection, agent_flag);
-    let (mask, ignored_no_mask) = masking(&policy, no_mask, agent);
+    let interactive = stdout_tty && std::io::stdin().is_terminal();
+    let (mask, ignored_no_mask) = masking(&policy, no_mask, agent, interactive);
     if ignored_no_mask {
         let _ = writeln!(
             stderr,
-            "penv: --no-mask is a person's flag; {} is driving, so the output stays masked.",
-            detection.name().unwrap_or("an agent")
+            "penv: --no-mask needs a terminal at both ends and no agent driving, so it was ignored."
+        );
+    }
+
+    let drift = extras(&schema, &values);
+    if !drift.is_empty() {
+        let _ = writeln!(
+            stderr,
+            "penv: {} is not in {SCHEMA_FILE}; penv masks it and penv check reports the drift.",
+            drift.join(", ")
         );
     }
 
     let secrets = if mask {
-        sensitive_values(&schema, &values)
+        masked_values(&schema, &values)
     } else {
         Vec::new()
     };
@@ -118,21 +129,23 @@ pub fn run(
 
 /// `--env`, else `PENV_ENV`, else development.
 fn resolve_environment(flag: Option<&str>, env: &Env) -> Result<String, CliError> {
+    let flag = flag.filter(|v| !v.is_empty());
+    let from_variable = flag.is_none();
     let name = flag
-        .or_else(|| env.get("PENV_ENV"))
-        .filter(|v| !v.is_empty())
+        .or_else(|| env.get("PENV_ENV").filter(|v| !v.is_empty()))
         .unwrap_or(DEFAULT_ENVIRONMENT)
         .to_string();
     if name == DEFAULT_ENVIRONMENT {
         return Ok(name);
     }
-    Err(CliError::new(
-        "environment_refused",
-        format!("{name} is not a local environment."),
-        format!(
-            "Local mode runs {DEFAULT_ENVIRONMENT} from {ENV_FILE}; every other environment lives in the cloud."
-        ),
-    )
+    let message = if from_variable {
+        format!("PENV_ENV is set to {name}, which is not a local environment.")
+    } else {
+        format!("{name} is not a local environment.")
+    };
+    Err(CliError::new("environment_refused", message, format!(
+        "Local mode runs {DEFAULT_ENVIRONMENT} from {ENV_FILE}; every other environment lives in the cloud."
+    ))
     .with_exit(Exit::EnvironmentRefused))
 }
 
@@ -147,23 +160,28 @@ fn apply_defaults(schema: &Schema, values: &mut Values) {
     }
 }
 
-fn sensitive_values(schema: &Schema, values: &Values) -> Vec<String> {
-    schema
-        .keys
+/// Everything the child is handed except the keys the schema marks public. A key
+/// the schema never heard of is masked; `check` names it as drift.
+fn masked_values(schema: &Schema, values: &Values) -> Vec<String> {
+    values
         .iter()
-        .filter(|key| key.sensitive)
-        .filter_map(|key| values.get(&key.name))
+        .filter(|(name, _)| schema.get(name).is_none_or(|key| key.sensitive))
+        .map(|(_, value)| value)
         .filter(|value| !value.is_empty())
         .cloned()
         .collect()
 }
 
-/// Whether to mask, and whether `--no-mask` was ignored saying so.
-fn masking(policy: &Policy, no_mask: bool, agent: bool) -> (bool, bool) {
-    if no_mask && agent {
+/// Whether to mask, and whether `--no-mask` was ignored saying so. Turning
+/// masking off is a person's move: both ends must be a terminal and no agent.
+fn masking(policy: &Policy, no_mask: bool, agent: bool, interactive: bool) -> (bool, bool) {
+    if !no_mask {
+        return (policy.mask, false);
+    }
+    if agent || !interactive {
         return (policy.mask, true);
     }
-    (policy.mask && !no_mask, false)
+    (false, false)
 }
 
 /// Inherit the environment, override it with the resolved values, and pipe the
@@ -201,7 +219,6 @@ fn spawn(
         )
     })?;
 
-    #[cfg(unix)]
     let previous_sigint = sigint::ignore_in_parent();
 
     let mut pumps: Vec<JoinHandle<()>> = Vec::new();
@@ -219,7 +236,6 @@ fn spawn(
         let _ = pump.join();
     }
 
-    #[cfg(unix)]
     sigint::restore(previous_sigint);
 
     let status = status.map_err(|e| {
@@ -276,7 +292,7 @@ fn exit_code(status: &ExitStatus) -> i32 {
 /// Ctrl-C belongs to the child. penv must not die first and close the pipes it
 /// is still scrubbing.
 #[cfg(unix)]
-mod sigint {
+pub(crate) mod sigint {
     const SIGINT: i32 = 2;
     const SIG_DFL: usize = 0;
     const SIG_IGN: usize = 1;
@@ -298,6 +314,33 @@ mod sigint {
         unsafe { signal(SIGINT, SIG_DFL) };
         Ok(())
     }
+}
+
+/// Windows has no sigaction. A null handler added to the console control table
+/// makes this process ignore CTRL_C_EVENT; the child, created before the call,
+/// keeps the default and still receives it from the console it shares.
+#[cfg(windows)]
+pub(crate) mod sigint {
+    unsafe extern "system" {
+        fn SetConsoleCtrlHandler(handler: usize, add: i32) -> i32;
+    }
+
+    pub fn ignore_in_parent() -> usize {
+        unsafe { SetConsoleCtrlHandler(0, 1) as usize }
+    }
+
+    pub fn restore(_previous: usize) {
+        unsafe { SetConsoleCtrlHandler(0, 0) };
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) mod sigint {
+    pub fn ignore_in_parent() -> usize {
+        0
+    }
+
+    pub fn restore(_previous: usize) {}
 }
 
 #[cfg(test)]
@@ -359,6 +402,20 @@ mod tests {
             assert_eq!(error.code, "environment_refused");
             assert!(error.fix.contains("cloud"));
         }
+
+        let from_variable =
+            resolve_environment(None, &env(&[("PENV_ENV", "staging")])).unwrap_err();
+        assert!(
+            from_variable.message.contains("PENV_ENV"),
+            "the message must name where staging came from: {}",
+            from_variable.message
+        );
+        let from_flag = resolve_environment(Some("staging"), &env(&[])).unwrap_err();
+        assert!(
+            !from_flag.message.contains("PENV_ENV"),
+            "{}",
+            from_flag.message
+        );
     }
 
     #[test]
@@ -383,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn only_sensitive_keys_with_a_value_are_masked() {
+    fn every_value_but_a_public_one_is_masked() {
         let schema = schema(vec![
             key("STRIPE_SECRET_KEY", None, true),
             key("EMPTY_SECRET", None, true),
@@ -393,23 +450,57 @@ mod tests {
             ("STRIPE_SECRET_KEY", "sk_test_FAKE0000"),
             ("EMPTY_SECRET", ""),
             ("NEXT_PUBLIC_APP_URL", "http://localhost:3000"),
+            ("LEGACY_API_KEY", "left_over_FAKE"),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
 
-        assert_eq!(sensitive_values(&schema, &values), ["sk_test_FAKE0000"]);
+        let masked = masked_values(&schema, &values);
+        assert!(
+            masked.contains(&"left_over_FAKE".to_string()),
+            "a key the schema never heard of must still be masked: {masked:?}"
+        );
+        assert!(masked.contains(&"sk_test_FAKE0000".to_string()));
+        assert!(!masked.contains(&"http://localhost:3000".to_string()));
+        assert_eq!(masked.len(), 2, "{masked:?}");
     }
 
     #[test]
-    fn a_person_may_turn_masking_off_and_an_agent_may_not() {
+    fn a_key_the_schema_does_not_declare_is_drift() {
+        let schema = schema(vec![key("PORT", Some("3000"), false)]);
+        let values: Values = [("PORT", "3000"), ("LEGACY_API_KEY", "left_over_FAKE")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        assert_eq!(extras(&schema, &values), ["LEGACY_API_KEY"]);
+    }
+
+    #[test]
+    fn a_person_may_turn_masking_off_only_at_a_terminal_on_both_ends() {
         let human = Policy::human();
         let agent = Policy::agent();
+        const INTERACTIVE: bool = true;
+        const PIPED: bool = false;
 
-        assert_eq!(masking(&human, false, false), (false, false));
-        assert_eq!(masking(&human, true, false), (false, false));
-        assert_eq!(masking(&agent, false, true), (true, false));
-        assert_eq!(masking(&agent, true, true), (true, true));
+        assert_eq!(masking(&human, false, false, INTERACTIVE), (false, false));
+        assert_eq!(masking(&human, true, false, INTERACTIVE), (false, false));
+        assert_eq!(
+            masking(&agent, true, true, INTERACTIVE),
+            (true, true),
+            "an agent never turns masking off"
+        );
+        assert_eq!(
+            masking(&agent, true, false, PIPED),
+            (true, true),
+            "a pipe is not a person, so --no-mask is ignored"
+        );
+    }
+
+    #[test]
+    fn the_parent_can_ignore_an_interrupt_and_put_it_back() {
+        let previous = sigint::ignore_in_parent();
+        sigint::restore(previous);
     }
 
     #[test]
@@ -419,7 +510,7 @@ mod tests {
             ..Detection::default()
         };
         let policy = Policy::for_(&detection, false);
-        assert_eq!(masking(&policy, false, false), (true, false));
-        assert_eq!(masking(&policy, true, false), (false, false));
+        assert_eq!(masking(&policy, false, false, true), (true, false));
+        assert_eq!(masking(&policy, true, false, true), (false, false));
     }
 }

@@ -11,3 +11,10 @@ url = "string"
 email = "string"
 port = "number"
 enum = "values | map('quote') | join(' | ')"
+
+[check]
+command = ["tsc", "--noEmit", "--strict", "--skipLibCheck", "--target", "es2020", "--module", "esnext", "--moduleResolution", "bundler", "{file}", "penv-globals.d.ts"]
+probe = ["tsc", "--version"]
+
+[check.files]
+"penv-globals.d.ts" = "declare const process: { env: Record<string, string | undefined> };\n"

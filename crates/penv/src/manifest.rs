@@ -138,7 +138,7 @@ const META: &[Meta] = &[
     Meta {
         path: "hook",
         implemented: true,
-        exit_codes: &[0, 2],
+        exit_codes: &[0, 1, 2],
         ..DEFAULT_META
     },
     Meta {

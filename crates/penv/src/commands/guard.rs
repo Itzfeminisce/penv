@@ -1,13 +1,13 @@
 use std::path::{Path, PathBuf};
 
-use penv_guards::{Guard, Roots, Scope, Write};
+use penv_guards::{Guard, Roots, Write};
 use serde_json::{Value, json};
 
 use crate::claim;
 use crate::commands::init::yes_no;
 use crate::commands::load_schema;
 use crate::error::{CliError, Exit};
-use crate::files::{Disk, home, on_path, show, write_file_making_parents};
+use crate::files::{Disk, home, on_path, show, write_executable, write_file_making_parents};
 use crate::output::{Output, Report, table};
 
 /// Native Windows runs Claude Code without a sandbox, so the deny rules and the
@@ -53,33 +53,33 @@ pub fn run(
 
     for guard in &guards {
         let installed = penv_guards::is_installed(guard, &probe);
-        // A check reports on every harness; a write only touches the ones asked for.
+        // The harnesses that are here, unless the run named others or asked for
+        // all of them; a laptop without a harness is not a failing one.
         let selected = if !named.is_empty() {
             named.iter().any(|n| n == &guard.name)
         } else {
-            all || installed || check
+            all || installed
         };
 
         let mut files: Vec<Value> = Vec::new();
-        for entry in guard.writes.iter().filter(|w| w.scope == Scope::Project) {
+        for entry in guard.project_writes() {
+            if !selected {
+                continue;
+            }
             let path = dir.join(&entry.path);
-            let status = if !selected {
-                "skipped".to_string()
-            } else {
-                act(guard, entry, &path, &json, check)?
-            };
-            failed |= installed && (status == "missing" || status == "stale");
+            let status = act(guard, entry, &path, &json, check)?;
+            failed |= check && status != CURRENT;
             rows.push(vec![
                 guard.name.clone(),
                 yes_no(installed),
                 entry.path.clone(),
-                status.clone(),
+                status.to_string(),
             ]);
-            files.push(json!({ "path": entry.path, "status": status }));
+            files.push(json!({ "path": entry.path, "status": status, "written": !check }));
         }
 
         if selected && !check {
-            for entry in guard.writes.iter().filter(|w| w.scope == Scope::User) {
+            for entry in guard.user_writes() {
                 blocks.push(json!({
                     "harness": guard.name,
                     "path": entry.path,
@@ -99,11 +99,11 @@ pub fn run(
 
     let claim = claim::for_schema(&schema);
     let style = out.style();
-    let mut lines = vec![table(
-        &["HARNESS", "INSTALLED", "FILE", "STATUS"],
-        &rows,
-        &style,
-    )];
+    let mut lines = vec![if rows.is_empty() {
+        style.dim("no harness is installed here; penv guard --all writes every one penv knows")
+    } else {
+        table(&["HARNESS", "INSTALLED", "FILE", "STATUS"], &rows, &style)
+    }];
     if !blocks.is_empty() {
         lines.push(String::new());
         for block in &blocks {
@@ -152,7 +152,7 @@ pub fn auto(dir: &Path, schema: &Value) -> Vec<PathBuf> {
         if !penv_guards::is_installed(&guard, &probe) {
             continue;
         }
-        for entry in guard.writes.iter().filter(|w| w.scope == Scope::Project) {
+        for entry in guard.project_writes() {
             let path = dir.join(&entry.path);
             let Ok(fragment) = render(&guard, entry, schema) else {
                 continue;
@@ -161,13 +161,18 @@ pub fn auto(dir: &Path, schema: &Value) -> Vec<PathBuf> {
             let Ok(outcome) = penv_guards::apply(entry, existing.as_deref(), &fragment) else {
                 continue;
             };
-            if outcome.changed && write_file_making_parents(&path, &outcome.content).is_ok() {
+            if outcome.changed && put(entry, &path, &outcome.content).is_ok() {
                 written.push(path);
             }
         }
     }
     written
 }
+
+/// What was found before anything was written; a write run then makes it so.
+const CURRENT: &str = "current";
+const STALE: &str = "stale";
+const MISSING: &str = "missing";
 
 /// Merge one write, and put it on disk unless this is a check.
 fn act(
@@ -176,7 +181,7 @@ fn act(
     path: &Path,
     schema: &Value,
     check: bool,
-) -> Result<String, CliError> {
+) -> Result<&'static str, CliError> {
     let fragment = render(guard, entry, schema)?;
     let existing = std::fs::read_to_string(path).ok();
     let present = existing.is_some();
@@ -189,22 +194,22 @@ fn act(
         .with_exit(Exit::Validation)
     })?;
 
-    if check {
-        return Ok(match (present, outcome.changed) {
-            (false, _) => "missing".into(),
-            (true, true) => "stale".into(),
-            (true, false) => "written".into(),
-        });
+    if !check && outcome.changed {
+        put(entry, path, &outcome.content)?;
     }
-    if outcome.changed {
-        write_file_making_parents(path, &outcome.content)?;
-    }
-    Ok(if outcome.changed {
-        "written"
+    Ok(match (present, outcome.changed) {
+        (false, _) => MISSING,
+        (true, true) => STALE,
+        (true, false) => CURRENT,
+    })
+}
+
+fn put(entry: &Write, path: &Path, content: &str) -> Result<(), CliError> {
+    if entry.executable {
+        write_executable(path, content)
     } else {
-        "current"
+        write_file_making_parents(path, content)
     }
-    .into())
 }
 
 fn render(guard: &Guard, entry: &Write, schema: &Value) -> Result<String, CliError> {

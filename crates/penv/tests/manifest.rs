@@ -188,7 +188,7 @@ fn global_flags_are_listed_once() {
         .iter()
         .map(|f| f["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["json", "agent"]);
+    assert_eq!(names, ["json", "format", "agent"]);
     for command in commands(&manifest) {
         let flags: Vec<&str> = command["flags"]
             .as_array()
@@ -197,7 +197,7 @@ fn global_flags_are_listed_once() {
             .map(|f| f["name"].as_str().unwrap())
             .collect();
         assert!(
-            !flags.contains(&"json") && !flags.contains(&"agent"),
+            !flags.contains(&"json") && !flags.contains(&"agent") && !flags.contains(&"format"),
             "{} repeats a global flag",
             command["path"]
         );
