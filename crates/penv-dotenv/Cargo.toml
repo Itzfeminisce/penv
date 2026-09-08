@@ -1,0 +1,11 @@
+[package]
+name = "penv-dotenv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The safe-subset .env reader, writer and schema inference."
+
+[dependencies]
+penv-schema.workspace = true
+thiserror.workspace = true

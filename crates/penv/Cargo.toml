@@ -1,0 +1,20 @@
+[package]
+name = "penv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "penv gets the right values into the right process at the right time."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "penv"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+penv-dotenv.workspace = true
+penv-schema.workspace = true
+serde_json.workspace = true

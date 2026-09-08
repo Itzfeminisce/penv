@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://penv.cloud/schema/manifest-1.json",
+  "title": "penv command manifest",
+  "description": "What `penv help --json` emits. The docs generator, shell completions and the agent skill read it, so nothing about a command is written twice.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "penvVersion",
+    "about",
+    "globalFlags",
+    "exitCodes",
+    "commands"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "description": "The manifest grammar version. Consumers pin it.",
+      "type": "integer"
+    },
+    "penvVersion": {
+      "description": "The version of the binary that emitted this manifest.",
+      "type": "string"
+    },
+    "about": {
+      "type": ["string", "null"]
+    },
+    "globalFlags": {
+      "description": "Flags every command accepts.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/flag" }
+    },
+    "exitCodes": {
+      "description": "The whole exit code table, not just the ones one command uses.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/exitCode" }
+    },
+    "commands": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/command" }
+    }
+  },
+  "$defs": {
+    "command": {
+      "type": "object",
+      "required": [
+        "name",
+        "path",
+        "about",
+        "implemented",
+        "revealsValues",
+        "requiresApproval",
+        "exitCodes",
+        "args",
+        "flags",
+        "subcommands"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "path": {
+          "description": "The full command path, space separated, as typed.",
+          "type": "string"
+        },
+        "about": { "type": ["string", "null"] },
+        "implemented": {
+          "description": "False while the command is a stub that refuses with exit 1.",
+          "type": "boolean"
+        },
+        "revealsValues": {
+          "description": "True when the command can write a secret value to stdout.",
+          "type": "boolean"
+        },
+        "requiresApproval": {
+          "description": "True when a person has to approve the command in the console.",
+          "type": "boolean"
+        },
+        "exitCodes": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "args": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/arg" }
+        },
+        "flags": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/flag" }
+        },
+        "subcommands": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/command" }
+        }
+      }
+    },
+    "arg": {
+      "type": "object",
+      "required": ["name", "about", "required", "variadic"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "about": { "type": ["string", "null"] },
+        "required": { "type": "boolean" },
+        "variadic": { "type": "boolean" }
+      }
+    },
+    "flag": {
+      "type": "object",
+      "required": [
+        "name",
+        "long",
+        "short",
+        "about",
+        "takesValue",
+        "default",
+        "env",
+        "human"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "long": { "type": ["string", "null"] },
+        "short": { "type": ["string", "null"] },
+        "about": { "type": ["string", "null"] },
+        "takesValue": { "type": "boolean" },
+        "default": { "type": ["string", "null"] },
+        "env": {
+          "description": "The environment variable that stands in for this flag.",
+          "type": ["string", "null"]
+        },
+        "human": {
+          "description": "True when an agent policy strips the flag, because only a person may pass it.",
+          "type": "boolean"
+        }
+      }
+    },
+    "exitCode": {
+      "type": "object",
+      "required": ["code", "name", "meaning"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "integer" },
+        "name": { "type": "string" },
+        "meaning": { "type": "string" }
+      }
+    }
+  }
+}

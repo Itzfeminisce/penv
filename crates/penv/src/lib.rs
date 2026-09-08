@@ -1,0 +1,11 @@
+//! The penv binary: the command tree, the manifest it publishes, the output
+//! contract and the exit codes. I/O lives here; the parsing and validation it
+//! calls are pure.
+
+pub mod cli;
+pub mod commands;
+pub mod env;
+pub mod error;
+pub mod files;
+pub mod manifest;
+pub mod output;
