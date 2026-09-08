@@ -1,161 +1,108 @@
 <h1 align="center">penv</h1>
 
 <p align="center">
-  <strong>Configuration that shares a data model with your production secret manager.</strong><br>
-  So the local↔production translation stops being where secrets drift, leak, and get rotated wrong.
+  <strong>Your <code>.env</code>, validated, typed, and kept out of your coding agent's reach.</strong><br>
+  One static binary. Works before you have an account. The cloud is the upgrade.
 </p>
 
 <p align="center">
-  <a href="#quickstart">Quickstart</a> ·
-  <a href="#is-penv-for-you">Is it for you?</a> ·
-  <a href="./docs/Documentation.md">Docs</a> ·
-  <a href="./docs/RFC.md">RFC</a> ·
-  <a href="./docs/Roadmap.md">Roadmap</a>
+  <a href="#the-first-minute">First minute</a> ·
+  <a href="#with-a-team">With a team</a> ·
+  <a href="#coding-agents">Coding agents</a> ·
+  <a href="#commands">Commands</a> ·
+  <a href="./docs/Design.md">Design</a>
 </p>
 
 ---
 
-`penv` stores each parameter as its own file, in a hierarchy that mirrors how Vault, AWS SSM, and Kubernetes Secrets already store the same data. One [Zod](https://zod.dev) schema gives you both runtime validation and TypeScript types. `penv doctor` tells you where your local config has drifted from your provider.
+penv reads the `.env` you already have, writes a small committed schema next to it, validates every value before your process starts, generates types for your language, and configures your coding agent's harness so it cannot read the file. When you are ready for a team, one command moves the values to [penv.cloud](https://penv.cloud) and deletes the file.
 
-```
-.penv/state/records/redis/password.production.enc   ⟷   secret/production/redis/password
-        └─ how you store it locally                     └─ how Vault stores it in prod
-```
+## The first minute
 
-Those are two serializations of the same record. Because the shapes match, **switching provider is a config change, not an application rewrite** — and the translation between them stops being a script someone wrote under deploy pressure.
-
-> **Docs describe finished penv; the [roadmap](./docs/Roadmap.md) says what's shippable today.** This README and the docs describe the complete system. For what's available in which release, the roadmap is the single source of truth.
-
-## What penv is — and isn't
-
-**penv is not** the fastest way to read `process.env` in TypeScript. [t3-env](https://github.com/t3-oss/t3-env) is, and it wins that job *structurally* — by doing less. If a single `.env` and t3-env make you happy, use them. We mean it.
-
-**penv is** the only configuration layer where your local environment and your production secret manager share a data model — instead of two systems you keep in sync by hand. That hand-maintained seam is the real risk surface: a key renamed in Vault but not locally, a stale `.env.example`, a staging secret pasted into a prod deploy at 2am. penv's job is to delete it.
-
-That's the whole pitch. It's narrow on purpose.
-
-## Is penv for you?
-
-**Yes, if** you already run (or are about to run) a real secret manager — Vault, AWS SSM, Kubernetes Secrets — and you hand-translate between a local `.env` and that provider, and you've felt the drift.
-
-**No, if** you're a solo dev or small project happy with `.env.example`. That's a smaller, well-solved problem, and penv would cost you more than it returns.
-
-## Quickstart
-
-Install the launcher once, then adopt your project in one command:
+No account, no prompts.
 
 ```bash
-npm install -g @penvhq/launcher
-penv init
+curl -fsSL https://penv.cloud/install | sh    # one binary, no Node
+
+penv init                                     # reads .env, writes .env.schema, gitignores .env
+penv run -- pnpm dev                          # validates, injects, masks
 ```
 
+`init` writes this, and only this, into your repository:
+
+```dotenv
+# @schema=1
+
+# @type=url
+DATABASE_URL=
+
+# @type=string
+STRIPE_SECRET_KEY=
+
+# @type=port @sensitive=false
+PORT=3000
+
+# @type=boolean @sensitive=false
+DEBUG=true
 ```
-Found dotenv files. Which should penv adopt?
 
-  [x] .env                      shared default
-  [x] .env.local                local override
-  [x] .env.development          development
-  [ ] .env.production           production
+Every key is sensitive and required unless a bundler prefix like `NEXT_PUBLIC_` or a dull value like `3000` says otherwise. No value that could be a secret is ever copied into the schema. Edit the file if a guess is wrong; the decorators follow the [@env-spec](https://varlock.dev) vocabulary, so a varlock user reads it on sight.
 
-✓ Declared environment       development
-✓ Generated penv.schema.ts   (draft schema — review it, it's yours)
-✓ Generated .penv/env.ts     (loads the shape — yours to edit)
-✓ Added @env alias to tsconfig.json
-✓ Installed @penvhq/penv
-✓ Imported 34 parameters
-✓ Validated development
-✓ Moved 3 dotenv files       .penv/state/rollback/dotenv/   (penv init undo restores them)
-```
-
-Adoption is all or nothing — if anything in the preflight fails, no file moves and penv says so — and `penv init undo` puts your dotenv files back under their exact names. Then start your app under penv:
+## With a team
 
 ```bash
-penv run -- pnpm dev
+penv login          # device code in the browser
+penv push           # values go to the cloud, .env is deleted
 ```
 
-`penv run` resolves your tree, validates it against your schema, and starts the exact command after `--` as an ordinary child process — your pipes, your `pre`/`post` hooks, your exit code. It never calls a provider, so a secret manager being down is not a reason your app can't start. `penv pull` is the explicit step that fetches; production reads a sealed artifact your CI built.
+From then on the cloud is the store and `.env` is a view you can regenerate with `penv pull`. A teammate clones the repo and types `penv run -- pnpm dev`; that is the whole onboarding. CI presents its OIDC token and gets a fifteen minute credential. A server with nothing to present enrols a keypair once.
 
-The global `penv` is a small launcher: your project commits the exact engine and provider versions it pins, so CI runs what your repository says, and a newer penv on your laptop changes nothing. Your `package.json` gains exactly one dependency — `@penvhq/penv`, the typed `@env` surface.
-
-Read values in code, fully typed — imported from your own project, no magic:
-
-```ts
-import { env } from "@env";
-
-env.databaseUrl;         // string, validated at boot
-env.redis.password;      // string | undefined (optional in your schema)
-```
-
-`penv init` scaffolds two modules you own: `penv.schema.ts` — the *shape*, side-effect free, so tests and tooling can import it without loading anything — and `.penv/env.ts`, the thin loader `@env` resolves to:
-
-```ts
-// penv.schema.ts — the shape, at the project root
-import { z } from "zod";
-
-export const schema = z.object({ /* your config shape */ });
-```
-
-```ts
-// .penv/env.ts — the loader
-import { load } from "@penvhq/penv";
-import { schema } from "../penv.schema.js";
-
-export { schema };
-export const env = load(schema);   // typed z.infer<typeof schema>, validated at import
-```
-
-The types come from `z.infer` on your schema; the values are validated against that same schema at boot. One source, so the type you code against and the value you receive can't diverge — and because the shape imports without side effects, a `drizzle.config.ts` or CI script started with `penv run -- drizzle-kit migrate` loads `schema.pick({ … })` from the *same* schema instead of hand-writing a second one. Generate a plain `.env` for deploy targets any time:
+## Typed access
 
 ```bash
-npx penv generate
+penv gen ts        # src/env.ts, a typed cast over process.env, no runtime
+penv gen py        # penv_env.py, pydantic with SecretStr for sensitive keys
 ```
 
-## The five-minute value moment
+A language target is a folder holding a `target.toml` and a template. Drop one into `.penv/targets/go/` and `penv gen go` works. The binary knows no language by name.
 
-You don't have to restructure anything to get value on day one. Point `doctor` at your existing provider and local config:
+## Coding agents
 
-```
-$ penv doctor
+An agent runs as you, so it can read what you can read. penv narrows that:
 
-✓ Schema valid
-⚠ Missing parameter         redis.password      required for production, absent
-⚠ Weak secret               app.jwt-secret      18 chars, schema requires ≥32
-⚠ Unused parameter          LEGACY_API_KEY      present, not in schema
-⚠ Drifted from provider     stripe.secret-key   local ≠ vault:secret/production
-⚠ Plaintext secret          db-password.staging value file is not encrypted
-✓ Provider                  vault
-```
+- Nothing at rest once pushed. There is no `.env` to `cat`.
+- `penv run` injects into the child process only, and scrubs every sensitive value, in raw, hex, base64 and URL-encoded forms, from the child's output whenever an agent session is detected.
+- `penv guard` writes what each harness actually enforces, from the schema: deny rules and a sandbox block for Claude Code, a permission profile for Codex, deny rules and fail-closed hooks for Cursor, and the equivalents for Copilot, Gemini, Cline, Windsurf and Amp. The hook is the penv binary itself, never a script that fails open.
+- `reveal` needs a person to approve in the console. An agent can ask; a human clicks.
 
-Restructuring into the full `.penv/` tree is the payoff for teams who want to *fix* what doctor finds — not a precondition for reading the report.
+The claim penv makes, printed by `penv guard --check`, is only what is true: it keeps secrets out of the files, the repo, the shell history and the captured output an agent reads. It cannot stop a process running as you from looking, so every value the cloud issues is short-lived, scoped and attributable to the session that used it.
 
-## Design tradeoffs (permanent, not gaps)
+## Commands
 
-We'd rather state these than let you discover them. They're properties of finished penv, not things a release closes:
+| Command | Does |
+|---|---|
+| `penv` | State and the one next command |
+| `init` | `.env` to `.env.schema`, never prompts |
+| `run -- cmd` | Validate, inject, mask |
+| `check [KEY]` | Schema, values, drift, guard coverage |
+| `ls` | Names and types, values masked |
+| `gen <target>` | Typed file for a language |
+| `guard` | Harness configs from the schema |
+| `push` / `pull` | Values to and from the cloud |
+| `set` / `unset` | Write a value, never echoed |
+| `reveal KEY` | One value, after console approval |
+| `login` / `logout` | Device code, credential in the OS keychain |
+| `machine enroll` | Bind a server keypair |
+| `help --json` | The command manifest |
 
-- **More files than a flat `.env`** — the cost of per-parameter access control and independent rotation, which a flat file structurally can't offer.
-- **Migration restructures your source of truth** — it's not an additive layer. After `import`, `.penv/` is primary and `.env` is generated. Reversible via `penv generate`, but not invisible.
-- **Doesn't beat t3-env on local speed** — different job, and it doesn't try to.
-- **An encrypted unscoped default needs the decrypt key for local dev** — encrypt per-environment values instead if that's a problem.
-- **Deploys need one pipeline step** — a `penv pull`, a mounted tree, or a sealed artifact your CI builds. Nothing in your repository carries production's values, which is the point and also the work.
+JSON when stdout is not a terminal. Exit codes: 0 ok, 1 error, 2 auth, 3 validation, 4 confirmation required, 5 no credential, 6 environment refused.
 
-For what's *available when* — encryption, providers, rotation — see the [roadmap](./docs/Roadmap.md).
+## Status
 
-## Documentation
-
-- **[Docs](./docs/Documentation.md)** — the complete reference to finished penv: concepts, resolution, schema, providers, encryption, rotation, CLI.
-- **[RFC-0001](./docs/RFC.md)** — the story book: why penv is shaped this way, the alternatives weighed, the decisions and reasoning.
-- **[Roadmap](./docs/Roadmap.md)** — the single source of truth for what's available in which release.
+Phase 1, local mode, is complete on the `v1-rust` branch. Phase 2, the cloud commands, is in progress. Phase 3 is distribution. The previous TypeScript CLI on `main` is retired and does not migrate.
 
 ## Contributing
 
-The highest-leverage contribution right now isn't code — it's signal. If you run a real secret manager and maintain the local↔production translation by hand, open an issue describing that pain. That's the demand question the roadmap can't answer from the inside.
+Read [AGENTS.md](./AGENTS.md) and [docs/Design.md](./docs/Design.md). Locally run only `cargo check`, `cargo test`, `cargo clippy` and `cargo fmt`; release builds happen in CI.
 
-For code: the developer-first rebuild (roadmap v0.9) is where the work is — the launcher, the `penv run` contract, and sealed delivery artifacts. Start there, or with a `doctor` check.
-
-## License
-
-MIT
-
----
-
-> Configuration should be treated as structured data — not a flat text file, and not two disconnected systems kept in sync by hand.
+MIT.
