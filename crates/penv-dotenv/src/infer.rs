@@ -57,7 +57,9 @@ fn is_loopback_url(value: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1")
 }
 
-fn infer_type(key: &str, value: &str) -> Type {
+/// The type `init` reads out of one pair. `set` uses it for a key the schema
+/// does not list yet, without ever copying the value.
+pub fn infer_type(key: &str, value: &str) -> Type {
     if value.is_empty() {
         return Type::new(if key.ends_with("PORT") {
             BaseType::Port

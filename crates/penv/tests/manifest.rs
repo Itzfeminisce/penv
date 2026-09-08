@@ -86,18 +86,17 @@ fn the_manifest_carries_the_whole_command_table() {
 }
 
 #[test]
-fn this_build_implements_local_mode_only() {
+fn distribution_is_the_only_thing_left_unimplemented() {
     let manifest = manifest();
-    let implemented: Vec<&str> = commands(&manifest)
+    let waiting: Vec<&str> = commands(&manifest)
         .iter()
-        .filter(|c| c["implemented"] == true)
+        .filter(|c| c["implemented"] == false)
         .map(|c| c["path"].as_str().unwrap())
         .collect();
     assert_eq!(
-        implemented,
-        [
-            "init", "run", "ls", "check", "gen", "guard", "hook", "schema", "help"
-        ]
+        waiting,
+        ["upgrade", "completions"],
+        "phase 3 is distribution"
     );
 }
 

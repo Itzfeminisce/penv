@@ -8,6 +8,7 @@ use penv_mask::Masker;
 use penv_schema::{Schema, Values, extras, validate};
 
 use crate::agent::detect_here;
+use crate::commands::cloud;
 use crate::env::Env;
 use crate::error::{CliError, Exit};
 use crate::files::{ENV_FILE, SCHEMA_FILE, find_schema, read_file, show};
@@ -35,7 +36,6 @@ pub fn run(
             "Put the command after --, as in penv run -- npm start.",
         ));
     }
-    let environment = resolve_environment(environment, process_env)?;
     let mut stderr = std::io::stderr();
 
     // The design has init fire when run meets a .env with no schema for it.
@@ -52,25 +52,29 @@ pub fn run(
     let dir = schema_path.parent().unwrap_or(cwd);
     let env_path = dir.join(ENV_FILE);
     let has_env = env_path.is_file();
+    let from_cloud = schema.is_cloud() && !has_env;
 
-    if schema.is_cloud() {
-        if !has_env {
-            return Err(CliError::new(
-                "not_implemented",
-                format!(
-                    "{} names a cloud project, and reading it is phase 2.",
-                    show(&schema_path)
-                ),
-                format!("Keep a {ENV_FILE} next to the schema until then."),
-            ));
-        }
+    let stdout_tty = std::io::stdout().is_terminal();
+    let detection = detect_here(process_env, stdout_tty);
+    let agent = detection.is_agent() || agent_flag;
+    let policy = Policy::for_(&detection, agent_flag);
+
+    let environment = if from_cloud {
+        cloud::environment(environment, process_env)
+    } else {
+        resolve_environment(environment, process_env)?
+    };
+
+    if schema.is_cloud() && has_env {
         let _ = writeln!(
             stderr,
-            "penv: {SCHEMA_FILE} names a cloud project; this build ran the local {ENV_FILE}."
+            "penv: {SCHEMA_FILE} names a cloud project; this run used the local {ENV_FILE}."
         );
     }
 
-    let mut values = if has_env {
+    let mut values = if from_cloud {
+        cloud_values(&schema, &environment, process_env, &detection, &mut stderr)?
+    } else if has_env {
         penv_dotenv::read(&read_file(&env_path)?).values()
     } else {
         Values::new()
@@ -96,10 +100,6 @@ pub fn run(
         return Ok(Report::new(body, text).with_exit(Exit::Validation));
     }
 
-    let stdout_tty = std::io::stdout().is_terminal();
-    let detection = detect_here(process_env, stdout_tty);
-    let agent = detection.is_agent() || agent_flag;
-    let policy = Policy::for_(&detection, agent_flag);
     let interactive = stdout_tty && std::io::stdin().is_terminal();
     let (mask, ignored_no_mask) = masking(&policy, no_mask, agent, interactive);
     if ignored_no_mask {
@@ -127,7 +127,45 @@ pub fn run(
     std::process::exit(code)
 }
 
-/// `--env`, else `PENV_ENV`, else development.
+/// The values for the address the schema names, through the cache when this host
+/// has one. Design section 5 decides whether the server is asked at all.
+fn cloud_values(
+    schema: &Schema,
+    environment: &str,
+    process_env: &Env,
+    detection: &penv_agent::Detection,
+    stderr: &mut impl Write,
+) -> Result<Values, CliError> {
+    let at = cloud::address(schema, environment)?;
+    let opened = cloud::Cloud::open(process_env, detection)?;
+    let bearer = opened.bearer(process_env, schema.org.as_deref())?;
+    let cache = opened.cache(&at);
+    let resolved = penv_cloud::cache::fetch(&opened.api, &bearer, &at, cache.as_ref(), opened.now)
+        .map_err(|e| cloud::refuse(e, Some(&at)))?;
+
+    if resolved.offline_warning {
+        let _ = writeln!(
+            stderr,
+            "penv: {at} could not be reached, so this run used the cached development values."
+        );
+    }
+    if !resolved.body.skipped.is_empty() {
+        let _ = writeln!(
+            stderr,
+            "penv: {} key(s) the cloud resolves itself were skipped.",
+            resolved.body.skipped.len()
+        );
+    }
+
+    Ok(resolved
+        .body
+        .keys
+        .iter()
+        .filter_map(|key| Some((key.name.clone(), key.value.clone()?)))
+        .collect())
+}
+
+/// Local mode has one environment. `--env`, else `PENV_ENV`, else development.
 fn resolve_environment(flag: Option<&str>, env: &Env) -> Result<String, CliError> {
     let flag = flag.filter(|v| !v.is_empty());
     let from_variable = flag.is_none();

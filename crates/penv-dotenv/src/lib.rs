@@ -7,6 +7,6 @@ mod read;
 mod write;
 
 pub use gitignore::{GitignoreUpdate, IGNORE_LINES, ensure_ignored};
-pub use infer::infer;
+pub use infer::{infer, infer_type};
 pub use read::{Dotenv, Entry, Warning, read};
 pub use write::{WriteError, write};

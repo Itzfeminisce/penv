@@ -1,10 +1,18 @@
 mod check;
+pub mod cloud;
 mod r#gen;
 pub mod guard;
 pub mod hook;
 mod init;
+mod login;
+mod logout;
 mod ls;
+mod machine;
+mod pull;
+mod push;
+mod reveal;
 mod run;
+mod set;
 mod state;
 
 use std::path::Path;
@@ -34,6 +42,47 @@ pub fn dispatch(cli: &Cli, out: &Output, cwd: &Path, env: &Env) -> Result<Report
             env,
             cli.agent,
         ),
+        Some(Command::Push {
+            env: environment,
+            org,
+            prune,
+        }) => push::run(
+            out,
+            cwd,
+            environment.as_deref(),
+            org.as_deref(),
+            *prune,
+            env,
+        ),
+        Some(Command::Pull {
+            env: environment,
+            i_am_human,
+        }) => pull::run(
+            out,
+            cwd,
+            environment.as_deref(),
+            *i_am_human,
+            env,
+            cli.agent,
+        ),
+        Some(Command::Login) => login::run(out, cwd, env, cli.agent),
+        Some(Command::Logout) => logout::run(out, cwd, env),
+        Some(Command::Set {
+            key,
+            env: environment,
+            value,
+        }) => set::set(out, cwd, key, environment.as_deref(), value.as_deref(), env),
+        Some(Command::Unset {
+            key,
+            env: environment,
+        }) => set::unset(out, cwd, key, environment.as_deref(), env),
+        Some(Command::Reveal {
+            key,
+            env: environment,
+        }) => reveal::run(out, cwd, key, environment.as_deref(), env, cli.agent),
+        Some(Command::Machine {
+            command: MachineCommand::Enroll { secret },
+        }) => machine::enroll(out, cwd, secret, env),
         Some(Command::Check { key }) => check::run(out, cwd, key.as_deref()),
         Some(Command::Ls) => ls::run(out, cwd),
         Some(Command::Gen {

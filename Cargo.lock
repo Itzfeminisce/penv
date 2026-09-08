@@ -1172,6 +1172,7 @@ version = "1.0.0-alpha.1"
 dependencies = [
  "clap",
  "penv-agent",
+ "penv-cloud",
  "penv-dotenv",
  "penv-guards",
  "penv-mask",
@@ -1193,7 +1194,10 @@ dependencies = [
  "getrandom 0.4.3",
  "hmac",
  "keyring",
+ "serde",
+ "serde_json",
  "sha2",
+ "thiserror",
  "ureq",
 ]
 

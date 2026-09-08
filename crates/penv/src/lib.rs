@@ -12,3 +12,4 @@ pub mod error;
 pub mod files;
 pub mod manifest;
 pub mod output;
+pub mod prompt;

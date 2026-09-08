@@ -78,6 +78,12 @@ pub enum Command {
         /// The environment to write to
         #[arg(long)]
         env: Option<String>,
+        /// The organisation that owns a project penv is about to create
+        #[arg(long, value_name = "SLUG")]
+        org: Option<String>,
+        /// Delete cloud keys the schema no longer lists
+        #[arg(long)]
+        prune: bool,
     },
 
     /// Write a plain .env from the cloud
@@ -103,6 +109,9 @@ pub enum Command {
         /// The environment to write to
         #[arg(long)]
         env: Option<String>,
+        /// Refused: a value passed here lands in the shell history
+        #[arg(long, value_name = "VALUE")]
+        value: Option<String>,
     },
 
     /// Remove one value

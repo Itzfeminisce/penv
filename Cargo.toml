@@ -22,3 +22,4 @@ penv-schema = { path = "crates/penv-schema", version = "1.0.0-alpha.1" }
 penv-dotenv = { path = "crates/penv-dotenv", version = "1.0.0-alpha.1" }
 penv-targets = { path = "crates/penv-targets", version = "1.0.0-alpha.1" }
 penv-guards = { path = "crates/penv-guards", version = "1.0.0-alpha.1" }
+penv-cloud = { path = "crates/penv-cloud", version = "1.0.0-alpha.1" }

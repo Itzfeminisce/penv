@@ -52,12 +52,15 @@ const META: &[Meta] = &[
     },
     Meta {
         path: "push",
-        exit_codes: &[0, 1, 2, 3, 5],
+        implemented: true,
+        exit_codes: &[0, 1, 2, 3, 5, 6],
+        human_flags: &["prune"],
         env_flags: &[("env", "PENV_ENV")],
         ..DEFAULT_META
     },
     Meta {
         path: "pull",
+        implemented: true,
         reveals_values: true,
         exit_codes: &[0, 1, 2, 5, 6],
         human_flags: &["i-am-human"],
@@ -66,21 +69,27 @@ const META: &[Meta] = &[
     },
     Meta {
         path: "login",
+        implemented: true,
         exit_codes: &[0, 1, 2],
         ..DEFAULT_META
     },
     Meta {
         path: "logout",
+        implemented: true,
+        exit_codes: &[0, 1, 2],
         ..DEFAULT_META
     },
     Meta {
         path: "set",
+        implemented: true,
         exit_codes: &[0, 1, 2, 3, 5, 6],
+        human_flags: &["value"],
         env_flags: &[("env", "PENV_ENV")],
         ..DEFAULT_META
     },
     Meta {
         path: "unset",
+        implemented: true,
         exit_codes: &[0, 1, 2, 5, 6],
         env_flags: &[("env", "PENV_ENV")],
         ..DEFAULT_META
@@ -111,6 +120,7 @@ const META: &[Meta] = &[
     },
     Meta {
         path: "reveal",
+        implemented: true,
         reveals_values: true,
         requires_approval: true,
         exit_codes: &[0, 1, 2, 4, 5, 6],
@@ -119,11 +129,13 @@ const META: &[Meta] = &[
     },
     Meta {
         path: "machine",
+        implemented: true,
         exit_codes: &[0, 1, 2],
         ..DEFAULT_META
     },
     Meta {
         path: "machine enroll",
+        implemented: true,
         exit_codes: &[0, 1, 2],
         ..DEFAULT_META
     },

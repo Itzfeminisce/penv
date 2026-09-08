@@ -171,15 +171,22 @@ fn a_dotenv_with_no_schema_gets_one_written_and_then_runs() {
 }
 
 #[test]
-fn a_cloud_schema_with_no_local_values_names_the_phase_it_needs() {
+fn a_cloud_schema_with_no_local_values_needs_a_credential() {
     let cloud = cloud_schema();
     let workspace = Workspace::new(&[(".env.schema", &cloud)]);
-    let output = workspace.run(&[], ECHO_VALUES);
+    let output = Command::new(env!("CARGO_BIN_EXE_penv"))
+        .current_dir(workspace.path())
+        .env("PENV_URL", "http://127.0.0.1:1")
+        .env_remove("PENV_TOKEN")
+        .args(["--agent", "run", "--"])
+        .args([SHELL, SHELL_FLAG, ECHO_VALUES])
+        .output()
+        .expect("penv runs");
 
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(5), "{}", stderr(&output));
     let text = stderr(&output);
-    assert!(text.contains("not_implemented"), "{text}");
-    assert!(text.contains("phase 2"), "{text}");
+    assert!(text.contains("no_credential"), "{text}");
+    assert!(text.contains("penv login"), "{text}");
 }
 
 #[test]

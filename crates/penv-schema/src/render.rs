@@ -21,12 +21,16 @@ pub fn render(schema: &Schema) -> String {
 
     for key in &schema.keys {
         out.push('\n');
-        render_key(&mut out, key);
+        out.push_str(&render_key(key));
     }
     out
 }
 
-fn render_key(out: &mut String, key: &Key) {
+/// One key's block, the way `render` writes it. `set` appends it to a file it
+/// must not otherwise reformat.
+pub fn render_key(key: &Key) -> String {
+    let mut out = String::new();
+    let out = &mut out;
     if let Some(description) = &key.description {
         let _ = writeln!(out, "# {description}");
     }
@@ -77,4 +81,5 @@ fn render_key(out: &mut String, key: &Key) {
         key.name,
         key.default.as_deref().map(quote).unwrap_or_default()
     );
+    std::mem::take(out)
 }

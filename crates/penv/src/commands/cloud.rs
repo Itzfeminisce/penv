@@ -1,0 +1,307 @@
+//! Where the binary meets penv.cloud: the client, the keychain, the cache
+//! directory, and the one place a `CloudError` becomes an exit code.
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use penv_agent::Detection;
+use penv_cloud::api::{Address, Api, Bearer};
+use penv_cloud::cache::Cache;
+use penv_cloud::error::CloudError;
+use penv_cloud::keychain::{Keyring, NoKeychain};
+use penv_cloud::{Clock, Keychain, SystemClock, credential};
+use penv_schema::{Key, Schema};
+use serde_json::Value;
+
+use crate::env::Env;
+use crate::error::{CliError, Exit};
+use crate::files::SCHEMA_FILE;
+
+/// The environment every command reads when nothing else says otherwise.
+pub const DEFAULT_ENVIRONMENT: &str = "development";
+
+pub struct Cloud {
+    pub api: Api,
+    pub keychain: Box<dyn Keychain>,
+    pub cache_dir: Option<PathBuf>,
+    pub now: u64,
+}
+
+impl Cloud {
+    pub fn open(env: &Env, detection: &Detection) -> Result<Cloud, CliError> {
+        let api = Api::from_env(env.as_map())
+            .map_err(|e| refuse(e, None))?
+            .stamped(detection.name(), detection.session_id.as_deref());
+        let keychain: Box<dyn Keychain> = match Keyring::open(api.base_url()) {
+            Some(keyring) => Box::new(keyring),
+            None => Box::new(NoKeychain),
+        };
+        Ok(Cloud {
+            cache_dir: penv_cloud::cache_dir(env.as_map()),
+            api,
+            keychain,
+            now: SystemClock.now(),
+        })
+    }
+
+    /// The credential this host can prove, whichever kind that turns out to be.
+    pub fn bearer(&self, env: &Env, org: Option<&str>) -> Result<Bearer, CliError> {
+        credential::resolve(env.as_map(), self.keychain.as_ref(), org)
+            .and_then(|kind| kind.obtain(&self.api, self.now))
+            .map_err(|e| refuse(e, None))
+    }
+
+    /// The `pcu_` a person's login left behind, and nothing else.
+    pub fn user(&self) -> Result<Option<Bearer>, CliError> {
+        self.keychain
+            .get(penv_cloud::keychain::USER)
+            .map(|held| held.filter(|v| !v.is_empty()).map(Bearer::new))
+            .map_err(|e| refuse(e, None))
+    }
+
+    pub fn cache(&self, at: &Address) -> Option<Cache> {
+        let dir = self.cache_dir.as_deref()?;
+        Cache::open(dir, self.api.base_url(), at, self.keychain.as_ref())
+            .ok()
+            .flatten()
+    }
+}
+
+/// `--env`, else `PENV_ENV`, else development.
+pub fn environment(flag: Option<&str>, env: &Env) -> String {
+    flag.filter(|v| !v.is_empty())
+        .or_else(|| env.get("PENV_ENV").filter(|v| !v.is_empty()))
+        .unwrap_or(DEFAULT_ENVIRONMENT)
+        .to_string()
+}
+
+/// The address the schema names. A schema with no header is local, and says so.
+pub fn address(schema: &Schema, environment: &str) -> Result<Address, CliError> {
+    match (&schema.org, &schema.project) {
+        (Some(org), Some(project)) => Ok(Address::new(org, project, environment)),
+        _ => Err(CliError::new(
+            "not_cloud",
+            format!("{SCHEMA_FILE} names no cloud project."),
+            "Run penv push to create one and write the header.",
+        )),
+    }
+}
+
+/// The per-key schema the cloud stores: what `penv schema --json` emits for
+/// that key, minus the name the route already carries.
+pub fn key_schema(key: &Key) -> Value {
+    let mut json = key.to_json();
+    if let Some(object) = json.as_object_mut() {
+        object.remove("name");
+    }
+    json
+}
+
+/// One refusal shape for every cloud failure, with the exit code the design
+/// publishes for it.
+pub fn refuse(error: CloudError, at: Option<&Address>) -> CliError {
+    let where_ = at.map(|a| a.to_string()).unwrap_or_default();
+    match &error {
+        CloudError::NoCredential => CliError::new(
+            "no_credential",
+            "penv has no credential for this host.".to_string(),
+            "Run penv login, or set PENV_TOKEN.",
+        )
+        .with_exit(Exit::NoCredential),
+
+        CloudError::Offline { .. } => CliError::new(
+            "offline",
+            error.to_string(),
+            "Check the connection; a cached development environment is the only thing penv runs offline.",
+        )
+        .with_exit(Exit::NoCredential),
+
+        CloudError::Api(api) => match (api.status, api.code.as_str()) {
+            (_, "cloned") => CliError::new(
+                "cloned",
+                "this host's key was seen on another machine, so the identity is locked.",
+                "Issue a new enrolment secret in the console and run penv machine enroll again.",
+            )
+            .with_exit(Exit::Auth),
+            (401, _) => CliError::new(
+                "unauthorized",
+                "the credential was rejected.",
+                "Run penv login again, or check PENV_TOKEN.",
+            )
+            .with_exit(Exit::Auth),
+            (403, _) => CliError::new(
+                "environment_refused",
+                format!("this identity may not read {where_}."),
+                "Ask the console for a role on that environment, or pick another with --env.",
+            )
+            .with_exit(Exit::EnvironmentRefused),
+            (404, _) => CliError::new(
+                "not_found",
+                format!("{where_} is not on this server."),
+                "Check the @penv header and the environment name in the console.",
+            ),
+            (429, _) => CliError::new(
+                "rate_limited",
+                match api.retry_after {
+                    Some(seconds) => format!("the server is rate limiting this identity for {seconds}s."),
+                    None => "the server is rate limiting this identity.".to_string(),
+                },
+                "Wait and try again.",
+            ),
+            (status, code) => CliError::new(
+                "server_refused",
+                format!("the server answered {status} {code}."),
+                "Run penv check, and try again once the console agrees.",
+            ),
+        },
+
+        CloudError::Keychain(_) => CliError::new(
+            "keychain",
+            error.to_string(),
+            "Unlock the OS keychain, or pass PENV_TOKEN instead.",
+        ),
+
+        CloudError::Url(_) => CliError::new(
+            "bad_url",
+            error.to_string(),
+            "Set PENV_URL to an https address, or unset it.",
+        ),
+
+        _ => CliError::new(
+            "cloud_failed",
+            error.to_string(),
+            "Try again; penv check reports what it can see from here.",
+        ),
+    }
+}
+
+/// Everything penv says while a command is still working goes to stderr, so
+/// stdout stays the one object the output contract promises.
+pub fn note(line: &str) {
+    let _ = writeln!(std::io::stderr(), "penv: {line}");
+}
+
+/// Open the verification page. A session with no terminal only prints it.
+pub fn open_browser(url: &str) -> bool {
+    let (program, args): (&str, Vec<&str>) = if cfg!(windows) {
+        ("cmd", vec!["/C", "start", "", url])
+    } else if cfg!(target_os = "macos") {
+        ("open", vec![url])
+    } else {
+        ("xdg-open", vec![url])
+    };
+    std::process::Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
+/// The project name `push` offers for a directory.
+pub fn project_name(dir: &Path) -> String {
+    dir.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "app".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use penv_cloud::error::ApiError;
+    use penv_schema::{BaseType, Type};
+
+    fn env(pairs: &[(&str, &str)]) -> Env {
+        Env::from_pairs(pairs)
+    }
+
+    #[test]
+    fn the_environment_falls_back_from_the_flag_to_the_variable_to_development() {
+        assert_eq!(environment(None, &env(&[])), "development");
+        assert_eq!(
+            environment(None, &env(&[("PENV_ENV", "staging")])),
+            "staging"
+        );
+        assert_eq!(
+            environment(Some("production"), &env(&[("PENV_ENV", "staging")])),
+            "production"
+        );
+        assert_eq!(environment(Some(""), &env(&[])), "development");
+    }
+
+    #[test]
+    fn a_forbidden_environment_is_exit_six_and_names_itself() {
+        let at = Address::new("acme", "api", "production");
+        let error = refuse(ApiError::new(403, "forbidden").into(), Some(&at));
+        assert_eq!(error.exit, Exit::EnvironmentRefused);
+        assert!(
+            error.message.contains("acme/api/production"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn the_refusals_carry_the_codes_the_design_publishes() {
+        for (error, exit, code) in [
+            (
+                CloudError::NoCredential,
+                Exit::NoCredential,
+                "no_credential",
+            ),
+            (
+                CloudError::Offline {
+                    url: "https://penv.cloud".into(),
+                    reason: "no route".into(),
+                },
+                Exit::NoCredential,
+                "offline",
+            ),
+            (
+                ApiError::new(401, "unauthorized").into(),
+                Exit::Auth,
+                "unauthorized",
+            ),
+            (ApiError::new(409, "cloned").into(), Exit::Auth, "cloned"),
+        ] {
+            let refused = refuse(error, None);
+            assert_eq!(refused.exit, exit, "{}", refused.code);
+            assert_eq!(refused.code, code);
+        }
+    }
+
+    #[test]
+    fn the_per_key_schema_drops_the_name_the_route_already_carries() {
+        let key = Key {
+            name: "PORT".into(),
+            ty: Type::new(BaseType::Port),
+            required: true,
+            ..Key::default()
+        };
+        let json = key_schema(&key);
+        assert_eq!(json.get("name"), None);
+        assert_eq!(json["type"]["name"], "port");
+        assert_eq!(json["required"], true);
+    }
+
+    #[test]
+    fn a_schema_with_no_header_is_not_an_address() {
+        assert!(address(&Schema::default(), "development").is_err());
+        let cloud = Schema {
+            org: Some("acme".into()),
+            project: Some("api".into()),
+            ..Schema::default()
+        };
+        assert_eq!(
+            address(&cloud, "development").unwrap().to_string(),
+            "acme/api/development"
+        );
+    }
+
+    #[test]
+    fn a_project_is_named_after_its_directory() {
+        assert_eq!(project_name(Path::new("/src/api-gateway")), "api-gateway");
+        assert_eq!(project_name(Path::new("")), "app");
+    }
+}
