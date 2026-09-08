@@ -94,19 +94,21 @@ impl Cache {
         dir: &Path,
         base_url: &str,
         address: &Address,
+        bearer: &Bearer,
         store: &dyn Keychain,
     ) -> Result<Option<Cache>> {
         if !store.usable() {
             return Ok(None);
         }
         let key = cache_key(store)?;
+        let dir = dir_for(dir, base_url);
         let name = name_of(base_url, address);
         Ok(Some(Cache {
             path: dir.join(format!("{name}.bin")),
             stamp: dir.join(format!("{name}.warned")),
             key,
             address: address.clone(),
-            aad: aad_of(base_url, address),
+            aad: aad_of(base_url, address, bearer),
         }))
     }
 
@@ -129,11 +131,7 @@ impl Cache {
         let plain =
             serde_json::to_vec(entry).map_err(|e| CloudError::Cache(format!("written: {e}")))?;
         let sealed = seal(&self.key, &self.aad, &plain)?;
-        std::fs::write(&self.path, sealed).map_err(|e| CloudError::Cache(format!("written: {e}")))
-    }
-
-    pub fn clear(&self) {
-        let _ = std::fs::remove_file(&self.path);
+        write_private(&self.path, &sealed).map_err(|e| CloudError::Cache(format!("written: {e}")))
     }
 
     /// The entry when it is still inside the TTL, and nothing otherwise.
@@ -272,17 +270,55 @@ fn cache_key(store: &dyn Keychain) -> Result<[u8; 32]> {
     Ok(key)
 }
 
+/// One server's files, so signing out can take that server's cache with it.
+pub fn dir_for(dir: &Path, base_url: &str) -> PathBuf {
+    dir.join(&digest_hex(base_url.as_bytes())[..32])
+}
+
+/// Everything cached for one server. Signing out leaves nothing behind.
+pub fn forget(dir: &Path, base_url: &str) {
+    let _ = std::fs::remove_dir_all(dir_for(dir, base_url));
+}
+
 /// The file name: one hash of the server and the address, so no path on disk
 /// names a project.
 fn name_of(base_url: &str, address: &Address) -> String {
-    let digest = Sha256::digest(aad_of(base_url, address).as_bytes());
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    digest_hex(format!("{base_url}|{address}").as_bytes())
 }
 
-/// The address, bound into the ciphertext so a file cannot be moved between
-/// environments.
-pub fn aad_of(base_url: &str, address: &Address) -> String {
-    format!("{base_url}|{address}")
+/// The server, the address and the credential, bound into the ciphertext: a
+/// file cannot be moved between environments, and another credential on this
+/// host cannot open it.
+pub fn aad_of(base_url: &str, address: &Address, bearer: &Bearer) -> String {
+    format!(
+        "{base_url}|{address}|{}",
+        digest_hex(bearer.token.as_bytes())
+    )
+}
+
+fn digest_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
+}
+
+/// A file only this account can read. Windows keeps the directory's own ACL,
+/// which is the user's profile and no one else.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(bytes)
 }
 
 pub fn seal(key: &[u8; 32], aad: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
@@ -332,20 +368,24 @@ mod tests {
 
     const KEY: [u8; 32] = [7u8; 32];
 
+    fn bound(environment: &str, token: &str) -> String {
+        aad_of(
+            "https://penv.cloud",
+            &Address::new("acme", "api", environment),
+            &Bearer::new(token),
+        )
+    }
+
     #[test]
     fn a_sealed_payload_comes_back_only_under_its_own_address() {
-        let aad = aad_of(
-            "https://penv.cloud",
-            &Address::new("acme", "api", "development"),
-        );
+        let aad = bound("development", "pcu_FAKE");
         let sealed = seal(&KEY, &aad, b"{\"keys\":[]}").unwrap();
         assert_eq!(unseal(&KEY, &aad, &sealed).unwrap(), b"{\"keys\":[]}");
 
-        let other = aad_of(
-            "https://penv.cloud",
-            &Address::new("acme", "api", "production"),
+        assert!(
+            unseal(&KEY, &bound("production", "pcu_FAKE"), &sealed).is_err(),
+            "the AAD must bind the address"
         );
-        assert!(unseal(&KEY, &other, &sealed).is_err(), "the AAD must bind");
         assert!(
             unseal(&[9u8; 32], &aad, &sealed).is_err(),
             "the key must bind"
@@ -353,11 +393,17 @@ mod tests {
     }
 
     #[test]
-    fn a_nonce_is_new_on_every_write() {
-        let aad = aad_of(
-            "https://penv.cloud",
-            &Address::new("acme", "api", "development"),
+    fn another_credential_on_this_host_cannot_open_the_cache() {
+        let sealed = seal(&KEY, &bound("development", "pcu_MINE"), b"{\"keys\":[]}").unwrap();
+        assert!(
+            unseal(&KEY, &bound("development", "pcu_THEIRS"), &sealed).is_err(),
+            "the AAD must bind the credential"
         );
+    }
+
+    #[test]
+    fn a_nonce_is_new_on_every_write() {
+        let aad = bound("development", "pcu_FAKE");
         let first = seal(&KEY, &aad, b"same").unwrap();
         let second = seal(&KEY, &aad, b"same").unwrap();
         assert_ne!(first, second);

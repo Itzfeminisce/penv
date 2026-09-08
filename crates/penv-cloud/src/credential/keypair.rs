@@ -101,6 +101,7 @@ impl Obtain for BoundKeypair<'_> {
         // re-enrolment, never a generation the server will read as a clone.
         remember(
             self.store,
+            keychain::KEYPAIR,
             &Enrolled {
                 generation: grant.generation,
                 ..self.enrolled.clone()
@@ -110,26 +111,42 @@ impl Obtain for BoundKeypair<'_> {
     }
 }
 
-/// Bind this host to a machine identity from a one-time secret.
+/// Bind this host to a machine identity from a one-time secret. The private key
+/// is on disk before the public half is sent, so a lost answer leaves a pending
+/// item to clear rather than a key the server knows and this host does not.
 pub fn enroll(api: &Api, store: &dyn Keychain, secret: &str) -> Result<Enrolled> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes)
         .map_err(|e| CloudError::Credential(format!("no key could be generated: {e}")))?;
     let key = SigningKey::from_bytes(&bytes);
-    let enrolment = api.keypair_enroll(secret, &b64::encode(&public_key_der(&key)))?;
+    let pending = Enrolled {
+        credential_id: String::new(),
+        secret: b64::encode(&bytes),
+        generation: 0,
+    };
+    remember(store, keychain::KEYPAIR_PENDING, &pending)?;
+
+    let enrolment = match api.keypair_enroll(secret, &b64::encode(&public_key_der(&key))) {
+        Ok(enrolment) => enrolment,
+        Err(error) => {
+            let _ = store.delete(keychain::KEYPAIR_PENDING);
+            return Err(error);
+        }
+    };
     let enrolled = Enrolled {
         credential_id: enrolment.credential_id,
-        secret: b64::encode(&bytes),
         generation: enrolment.generation,
+        ..pending
     };
-    remember(store, &enrolled)?;
+    remember(store, keychain::KEYPAIR, &enrolled)?;
+    let _ = store.delete(keychain::KEYPAIR_PENDING);
     Ok(enrolled)
 }
 
-fn remember(store: &dyn Keychain, enrolled: &Enrolled) -> Result<()> {
+fn remember(store: &dyn Keychain, item: &str, enrolled: &Enrolled) -> Result<()> {
     let json = serde_json::to_string(enrolled)
         .map_err(|e| CloudError::Credential(format!("the key could not be stored: {e}")))?;
-    store.set(keychain::KEYPAIR, &json)
+    store.set(item, &json)
 }
 
 /// What the key signs, exactly.

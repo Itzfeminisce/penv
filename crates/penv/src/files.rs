@@ -34,6 +34,30 @@ pub fn write_file(path: &Path, contents: &str) -> Result<(), CliError> {
     })
 }
 
+/// A file that will hold values: nobody but this account may read it. Windows
+/// keeps the directory's inherited ACL, which is the user's own profile.
+pub fn write_private_file(path: &Path, contents: &str) -> Result<(), CliError> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .and_then(|mut file| file.write_all(contents.as_bytes()))
+        .map_err(|e| {
+            CliError::new(
+                "unwritable_file",
+                format!("{} could not be written: {e}.", show(path)),
+                "Check the directory and its permissions.",
+            )
+        })
+}
+
 pub fn write_file_making_parents(path: &Path, contents: &str) -> Result<(), CliError> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()

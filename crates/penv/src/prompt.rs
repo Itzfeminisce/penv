@@ -21,12 +21,25 @@ pub fn read_value(prompt: &str) -> Result<String, CliError> {
             .map_err(unreadable)?;
         return Ok(trimmed(&buffer));
     }
+    read_typed(prompt)
+}
+
+/// A value typed at a terminal. Without the echo bit off it would be typed onto
+/// the screen, so there is no reading it here at all.
+fn read_typed(prompt: &str) -> Result<String, CliError> {
+    let stdin = std::io::stdin();
+    let Some(echo) = Echo::off() else {
+        return Err(CliError::new(
+            "no_echo_off",
+            "this terminal will not stop echoing what is typed, and a value is never shown.",
+            "Pipe the value on stdin instead: printf %s \"$VALUE\" | penv set <KEY>.",
+        ));
+    };
 
     let mut stderr = std::io::stderr();
     let _ = write!(stderr, "{prompt}");
     let _ = stderr.flush();
 
-    let echo = Echo::off();
     let mut line = String::new();
     let read = stdin.lock().read_line(&mut line);
     drop(echo);
@@ -47,12 +60,12 @@ fn unreadable(e: std::io::Error) -> CliError {
     )
 }
 
-/// Echo off for as long as it is held.
+/// Echo off for as long as it is held. `None` where it could not be turned off.
 struct Echo(Option<Saved>);
 
 impl Echo {
-    fn off() -> Echo {
-        Echo(Saved::off())
+    fn off() -> Option<Echo> {
+        Saved::off().map(|saved| Echo(Some(saved)))
     }
 }
 
@@ -175,7 +188,17 @@ mod tests {
 
     #[test]
     fn turning_echo_off_and_back_on_is_safe_without_a_terminal() {
-        let echo = Echo::off();
-        drop(echo);
+        drop(Echo::off());
+    }
+
+    #[test]
+    fn a_terminal_that_keeps_echoing_is_refused_rather_than_read() {
+        // The suite runs with stdin redirected, so echo cannot be turned off here.
+        if Echo::off().is_some() {
+            return;
+        }
+        let error = read_typed("VALUE: ").unwrap_err();
+        assert_eq!(error.code, "no_echo_off");
+        assert!(error.fix.contains("stdin"), "{}", error.fix);
     }
 }

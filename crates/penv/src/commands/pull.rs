@@ -10,7 +10,7 @@ use crate::agent::detect_here;
 use crate::commands::cloud::{Cloud, address, environment, refuse};
 use crate::env::Env;
 use crate::error::{CliError, Exit};
-use crate::files::{ENV_FILE, GITIGNORE_FILE, read_file, show, write_file};
+use crate::files::{ENV_FILE, GITIGNORE_FILE, read_file, show, write_file, write_private_file};
 use crate::output::{Output, Report};
 
 /// Write a plain `.env` from the cloud. Only a person asks for this.
@@ -68,7 +68,7 @@ pub fn run(
     })?;
 
     let env_path = dir.join(ENV_FILE);
-    write_file(&env_path, &contents)?;
+    write_private_file(&env_path, &contents)?;
 
     let ignore_path = dir.join(GITIGNORE_FILE);
     let existing = if ignore_path.is_file() {

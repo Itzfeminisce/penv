@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use ureq::http::{Response, StatusCode};
 use ureq::{Body, RequestBuilder};
 
+use crate::clock::epoch_from_rfc3339;
 use crate::error::{ApiError, CloudError, Result};
 
 /// Where the CLI talks to when nothing says otherwise.
@@ -20,6 +21,54 @@ pub const AGENT_HEADER: &str = "X-Penv-Agent";
 pub const SESSION_HEADER: &str = "X-Penv-Session";
 
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// A server error is tried once more, this long after the first one.
+const RETRY_PAUSE: Duration = Duration::from_secs(1);
+
+/// One path segment, percent-encoded to RFC 3986's unreserved set. Slugs and
+/// environment names are free-form, so nothing in one may reach the router.
+pub fn encode_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for byte in segment.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// The same JSON without its null members: the server reads a null as a value,
+/// and the contract asks for absent fields to be absent.
+pub fn without_nulls(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| (k, without_nulls(v)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// The machine's name, for the approval page. No crate reads a hostname, so the
+/// platform's own variable answers, and an unnamed host is just the CLI.
+pub fn host_name() -> String {
+    for var in ["COMPUTERNAME", "HOSTNAME", "HOST"] {
+        if let Some(name) = std::env::var_os(var)
+            && !name.is_empty()
+        {
+            return name.to_string_lossy().into_owned();
+        }
+    }
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "penv CLI".to_string())
+}
 
 /// A bearer credential. Never printed: `Debug` says only that it exists.
 #[derive(Clone, PartialEq, Eq)]
@@ -78,6 +127,17 @@ impl Address {
             environment: environment.to_string(),
         }
     }
+
+    /// The three segments as they go into a URL. [`Display`] stays the address a
+    /// person reads.
+    pub fn path(&self) -> String {
+        format!(
+            "{}/{}/{}",
+            encode_segment(&self.org),
+            encode_segment(&self.project),
+            encode_segment(&self.environment)
+        )
+    }
 }
 
 impl fmt::Display for Address {
@@ -86,8 +146,8 @@ impl fmt::Display for Address {
     }
 }
 
-/// A time the server sent. It is quoted back, never arithmetic, unless it came
-/// as a number of seconds.
+/// A time the server sent: the ISO-8601 string the contract promises, or a
+/// number of seconds where one is sent instead.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum Stamp {
@@ -99,7 +159,7 @@ impl Stamp {
     pub fn epoch(&self) -> Option<u64> {
         match self {
             Stamp::Epoch(n) => Some(*n),
-            Stamp::Text(_) => None,
+            Stamp::Text(text) => epoch_from_rfc3339(text),
         }
     }
 }
@@ -114,11 +174,12 @@ pub struct DeviceStart {
     pub interval: u64,
 }
 
-/// What the device token route said this time round.
+/// What the device token route said this time round. A 429 carries the seconds
+/// the server asked for, and is never an error: polling only slows down.
 #[derive(Debug, Clone)]
 pub enum DevicePoll {
     Pending,
-    SlowDown,
+    SlowDown(Option<u64>),
     Expired,
     Denied,
     Granted(Grant),
@@ -145,9 +206,12 @@ impl fmt::Debug for Grant {
     }
 }
 
+/// A person's account. The email may be null, so a login says so rather than
+/// failing to read the answer.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct User {
-    pub email: String,
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -159,6 +223,7 @@ pub struct Org {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Project {
     pub slug: String,
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub environments: Vec<String>,
@@ -183,13 +248,14 @@ pub struct CloudKey {
 
 impl CloudKey {
     /// What a write sends: the address, the schema and the value, never the
-    /// version or the kind the server owns.
+    /// version or the kind the server owns. An absent schema field is absent,
+    /// not null.
     pub fn to_write(&self) -> Value {
         let mut out = serde_json::Map::new();
         out.insert("path".into(), Value::String(self.path.clone()));
         out.insert("name".into(), Value::String(self.name.clone()));
         if let Some(schema) = &self.schema {
-            out.insert("schema".into(), schema.clone());
+            out.insert("schema".into(), without_nulls(schema.clone()));
         }
         if let Some(value) = &self.value {
             out.insert("value".into(), Value::String(value.clone()));
@@ -204,6 +270,18 @@ impl CloudKey {
         } else {
             format!("{}/{}", self.path, self.name)
         }
+    }
+
+    /// The same address as URL segments, each one encoded on its own.
+    pub fn key_path(&self) -> String {
+        let mut segments: Vec<String> = self
+            .path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(encode_segment)
+            .collect();
+        segments.push(encode_segment(&self.name));
+        segments.join("/")
     }
 }
 
@@ -358,30 +436,50 @@ impl Api {
             .header("Authorization", format!("Bearer {}", bearer.token))
     }
 
+    /// One request, and one more a second later when the server itself failed.
+    fn attempt(
+        &self,
+        url: &str,
+        send_once: impl Fn() -> std::result::Result<Response<Body>, ureq::Error>,
+    ) -> Result<Response<Body>> {
+        let response = send(url, send_once())?;
+        if response.status().as_u16() < 500 {
+            return Ok(response);
+        }
+        std::thread::sleep(RETRY_PAUSE);
+        send(url, send_once())
+    }
+
     // --- device-code login ---------------------------------------------------
 
-    pub fn device_start(&self) -> Result<DeviceStart> {
+    /// `device` is what the approval page shows the person: this machine's name.
+    pub fn device_start(&self, device: &str) -> Result<DeviceStart> {
         let url = self.url("/auth/device");
-        let mut response = send(&url, self.stamp(self.http.post(&url)).send_empty())?;
+        let mut response = self.attempt(&url, || {
+            self.stamp(self.http.post(&url))
+                .send_json(json!({ "device": device }))
+        })?;
         expect(&mut response, &[StatusCode::CREATED, StatusCode::OK])?;
         read_json(&url, &mut response)
     }
 
     pub fn device_poll(&self, device_code: &str) -> Result<DevicePoll> {
         let url = self.url("/auth/device/token");
-        let mut response = send(
-            &url,
+        let mut response = self.attempt(&url, || {
             self.stamp(self.http.post(&url))
-                .send_json(json!({ "deviceCode": device_code })),
-        )?;
+                .send_json(json!({ "deviceCode": device_code }))
+        })?;
         let status = response.status().as_u16();
         if (200..300).contains(&status) {
             return Ok(DevicePoll::Granted(read_json(&url, &mut response)?));
         }
         let error = refusal(status, &mut response);
+        // Every 429 is the ceiling talking, whichever code it carries.
+        if status == 429 {
+            return Ok(DevicePoll::SlowDown(error.retry_after));
+        }
         Ok(match error.code.as_str() {
             "authorization_pending" => DevicePoll::Pending,
-            "slow_down" => DevicePoll::SlowDown,
             "expired" => DevicePoll::Expired,
             "denied" => DevicePoll::Denied,
             _ => return Err(error.into()),
@@ -390,7 +488,9 @@ impl Api {
 
     pub fn revoke(&self, bearer: &Bearer) -> Result<()> {
         let url = self.url("/auth/revoke");
-        let mut response = send(&url, self.authed(self.http.post(&url), bearer).send_empty())?;
+        let mut response = self.attempt(&url, || {
+            self.authed(self.http.post(&url), bearer).send_empty()
+        })?;
         expect(&mut response, &[StatusCode::OK, StatusCode::NO_CONTENT])?;
         Ok(())
     }
@@ -398,12 +498,14 @@ impl Api {
     // --- environments --------------------------------------------------------
 
     pub fn env_head(&self, bearer: &Bearer, at: &Address, etag: Option<&str>) -> Result<Freshness> {
-        let url = self.url(&format!("/envs/{at}"));
-        let mut request = self.authed(self.http.head(&url), bearer);
-        if let Some(etag) = etag {
-            request = request.header("If-None-Match", etag);
-        }
-        let mut response = send(&url, request.call())?;
+        let url = self.url(&format!("/envs/{}", at.path()));
+        let mut response = self.attempt(&url, || {
+            let mut request = self.authed(self.http.head(&url), bearer);
+            if let Some(etag) = etag {
+                request = request.header("If-None-Match", etag);
+            }
+            request.call()
+        })?;
         match response.status().as_u16() {
             304 => Ok(Freshness::Unchanged),
             200 => Ok(Freshness::Changed(etag_of(&response))),
@@ -418,15 +520,17 @@ impl Api {
         etag: Option<&str>,
         values: bool,
     ) -> Result<Fetched> {
-        let url = self.url(&format!("/envs/{at}"));
-        let mut request = self.authed(self.http.get(&url), bearer);
-        if !values {
-            request = request.query("values", "false");
-        }
-        if let Some(etag) = etag {
-            request = request.header("If-None-Match", etag);
-        }
-        let mut response = send(&url, request.call())?;
+        let url = self.url(&format!("/envs/{}", at.path()));
+        let mut response = self.attempt(&url, || {
+            let mut request = self.authed(self.http.get(&url), bearer);
+            if !values {
+                request = request.query("values", "false");
+            }
+            if let Some(etag) = etag {
+                request = request.header("If-None-Match", etag);
+            }
+            request.call()
+        })?;
         match response.status().as_u16() {
             304 => Ok(Fetched::NotModified),
             200 => Ok(Fetched::Body {
@@ -444,36 +548,37 @@ impl Api {
         keys: &[CloudKey],
         prune: bool,
     ) -> Result<PutResult> {
-        let url = self.url(&format!("/envs/{at}"));
-        let mut response = send(
-            &url,
-            self.authed(self.http.put(&url), bearer).send_json(json!({
-                "keys": keys.iter().map(CloudKey::to_write).collect::<Vec<_>>(),
-                "prune": prune,
-            })),
-        )?;
+        let url = self.url(&format!("/envs/{}", at.path()));
+        let body = json!({
+            "keys": keys.iter().map(CloudKey::to_write).collect::<Vec<_>>(),
+            "prune": prune,
+        });
+        let mut response = self.attempt(&url, || {
+            self.authed(self.http.put(&url), bearer).send_json(&body)
+        })?;
         expect(&mut response, &[StatusCode::OK])?;
         read_json(&url, &mut response)
     }
 
     pub fn key_set(&self, bearer: &Bearer, at: &Address, key: &CloudKey) -> Result<SetResult> {
-        let url = self.url(&format!("/envs/{at}/keys/{}", key.address()));
+        let url = self.url(&format!("/envs/{}/keys/{}", at.path(), key.key_path()));
         let mut body = key.to_write();
         if let Some(object) = body.as_object_mut() {
             object.remove("path");
             object.remove("name");
         }
-        let mut response = send(
-            &url,
-            self.authed(self.http.patch(&url), bearer).send_json(body),
-        )?;
+        let mut response = self.attempt(&url, || {
+            self.authed(self.http.patch(&url), bearer).send_json(&body)
+        })?;
         expect(&mut response, &[StatusCode::OK])?;
         read_json(&url, &mut response)
     }
 
-    pub fn key_unset(&self, bearer: &Bearer, at: &Address, key: &str) -> Result<UnsetResult> {
-        let url = self.url(&format!("/envs/{at}/keys/{key}"));
-        let mut response = send(&url, self.authed(self.http.delete(&url), bearer).call())?;
+    /// The key's whole address, the same segments `key_set` writes to.
+    pub fn key_unset(&self, bearer: &Bearer, at: &Address, key: &CloudKey) -> Result<UnsetResult> {
+        let url = self.url(&format!("/envs/{}/keys/{}", at.path(), key.key_path()));
+        let mut response =
+            self.attempt(&url, || self.authed(self.http.delete(&url), bearer).call())?;
         expect(&mut response, &[StatusCode::OK])?;
         read_json(&url, &mut response)
     }
@@ -487,7 +592,8 @@ impl Api {
             orgs: Vec<Org>,
         }
         let url = self.url("/orgs");
-        let mut response = send(&url, self.authed(self.http.get(&url), bearer).call())?;
+        let mut response =
+            self.attempt(&url, || self.authed(self.http.get(&url), bearer).call())?;
         expect(&mut response, &[StatusCode::OK])?;
         Ok(read_json::<Body>(&url, &mut response)?.orgs)
     }
@@ -498,56 +604,62 @@ impl Api {
             #[serde(default)]
             projects: Vec<Project>,
         }
-        let url = self.url(&format!("/orgs/{org}/projects"));
-        let mut response = send(&url, self.authed(self.http.get(&url), bearer).call())?;
+        let url = self.url(&format!("/orgs/{}/projects", encode_segment(org)));
+        let mut response =
+            self.attempt(&url, || self.authed(self.http.get(&url), bearer).call())?;
         expect(&mut response, &[StatusCode::OK])?;
         Ok(read_json::<Body>(&url, &mut response)?.projects)
     }
 
+    /// The slug the server derived is in the answer, and it is the only name the
+    /// header may carry.
     pub fn create_project(
         &self,
         bearer: &Bearer,
         org: &str,
         name: &str,
         environments: &[String],
-    ) -> Result<()> {
-        let url = self.url(&format!("/orgs/{org}/projects"));
-        let mut response = send(
-            &url,
-            self.authed(self.http.post(&url), bearer)
-                .send_json(json!({ "name": name, "environments": environments })),
-        )?;
+    ) -> Result<Project> {
+        let url = self.url(&format!("/orgs/{}/projects", encode_segment(org)));
+        let body = json!({ "name": name, "environments": environments });
+        let mut response = self.attempt(&url, || {
+            self.authed(self.http.post(&url), bearer).send_json(&body)
+        })?;
         expect(&mut response, &[StatusCode::CREATED, StatusCode::OK])?;
-        Ok(())
+        let answered: Value = read_json(&url, &mut response)?;
+        let project = answered.get("project").unwrap_or(&answered);
+        serde_json::from_value(project.clone()).map_err(|_| CloudError::Unreadable {
+            url: url.clone(),
+            reason: "no project slug in the answer".into(),
+        })
     }
 
     // --- credential exchanges ------------------------------------------------
 
     pub fn exchange_oidc(&self, token: &str, now: u64) -> Result<Bearer> {
         let url = self.url("/auth/oidc");
-        let mut response = send(
-            &url,
+        let mut response = self.attempt(&url, || {
             self.stamp(self.http.post(&url))
-                .send_json(json!({ "token": token })),
-        )?;
+                .send_json(json!({ "token": token }))
+        })?;
         expect(&mut response, &[StatusCode::OK, StatusCode::CREATED])?;
         bearer_from(&url, &mut response, now)
     }
 
     pub fn exchange_aws(&self, signed: &SignedRequest, now: u64) -> Result<Bearer> {
         let url = self.url("/auth/aws");
-        let mut response = send(&url, self.stamp(self.http.post(&url)).send_json(signed))?;
+        let mut response =
+            self.attempt(&url, || self.stamp(self.http.post(&url)).send_json(signed))?;
         expect(&mut response, &[StatusCode::OK, StatusCode::CREATED])?;
         bearer_from(&url, &mut response, now)
     }
 
     pub fn keypair_challenge(&self, credential_id: &str) -> Result<Challenge> {
         let url = self.url("/auth/keypair/challenge");
-        let mut response = send(
-            &url,
+        let mut response = self.attempt(&url, || {
             self.stamp(self.http.post(&url))
-                .send_json(json!({ "credentialId": credential_id })),
-        )?;
+                .send_json(json!({ "credentialId": credential_id }))
+        })?;
         expect(&mut response, &[StatusCode::OK, StatusCode::CREATED])?;
         read_json(&url, &mut response)
     }
@@ -561,15 +673,14 @@ impl Api {
         now: u64,
     ) -> Result<KeypairGrant> {
         let url = self.url("/auth/keypair");
-        let mut response = send(
-            &url,
-            self.stamp(self.http.post(&url)).send_json(json!({
-                "credentialId": credential_id,
-                "nonce": nonce,
-                "generation": generation,
-                "signature": signature,
-            })),
-        )?;
+        let body = json!({
+            "credentialId": credential_id,
+            "nonce": nonce,
+            "generation": generation,
+            "signature": signature,
+        });
+        let mut response =
+            self.attempt(&url, || self.stamp(self.http.post(&url)).send_json(&body))?;
         expect(&mut response, &[StatusCode::OK, StatusCode::CREATED])?;
         let body: Value = read_json(&url, &mut response)?;
         Ok(KeypairGrant {
@@ -583,11 +694,10 @@ impl Api {
 
     pub fn keypair_enroll(&self, secret: &str, public_key: &str) -> Result<Enrolment> {
         let url = self.url("/auth/keypair/enroll");
-        let mut response = send(
-            &url,
+        let mut response = self.attempt(&url, || {
             self.stamp(self.http.post(&url))
-                .send_json(json!({ "secret": secret, "publicKey": public_key })),
-        )?;
+                .send_json(json!({ "secret": secret, "publicKey": public_key }))
+        })?;
         expect(&mut response, &[StatusCode::OK, StatusCode::CREATED])?;
         read_json(&url, &mut response)
     }
@@ -604,37 +714,65 @@ impl Api {
         struct Body {
             value: String,
         }
-        let mut request = self
-            .http
-            .get(url)
-            .header("Authorization", format!("Bearer {request_token}"))
-            .header("Accept", "application/json");
-        if let Some(audience) = audience {
-            request = request.query("audience", audience);
-        }
-        let mut response = send(url, request.call())?;
+        let url = &checked_url(url)?;
+        let mut response = self.attempt(url, || {
+            let mut request = self
+                .http
+                .get(url)
+                .header("Authorization", format!("Bearer {request_token}"))
+                .header("Accept", "application/json");
+            if let Some(audience) = audience {
+                request = request.query("audience", audience);
+            }
+            request.call()
+        })?;
         expect(&mut response, &[StatusCode::OK])?;
         Ok(read_json::<Body>(url, &mut response)?.value)
     }
 }
 
-/// https everywhere but the loopback the tests and a local server run on.
+/// The base URL, with its trailing slash off.
 pub fn checked_base_url(raw: &str) -> Result<String> {
-    let trimmed = raw.trim_end_matches('/');
-    let (scheme, rest) = trimmed
+    checked_url(raw.trim_end_matches('/'))
+}
+
+/// https everywhere but the loopback the tests and a local server run on. Every
+/// URL penv sends a credential to goes through here.
+pub fn checked_url(raw: &str) -> Result<String> {
+    let (scheme, rest) = raw
         .split_once("://")
         .ok_or_else(|| CloudError::Url(format!("{raw} is not an http or https URL")))?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = authority.split(':').next().unwrap_or_default();
+    // A userinfo half hides the real host behind an @, so no authority may carry one.
+    if authority.contains('@') {
+        return Err(CloudError::Url(format!(
+            "{raw} carries a user in front of its host, and penv sends a credential to hosts only"
+        )));
+    }
+    let host = host_of(authority);
+    if host.is_empty() {
+        return Err(CloudError::Url(format!("{raw} names no host")));
+    }
     match scheme {
-        "https" => Ok(trimmed.to_string()),
-        "http" if matches!(host, "127.0.0.1" | "localhost") => Ok(trimmed.to_string()),
+        "https" => Ok(raw.to_string()),
+        "http" if matches!(host, "127.0.0.1" | "localhost" | "[::1]") => Ok(raw.to_string()),
         "http" => Err(CloudError::Url(format!(
             "{raw} is plain http, and a credential only travels over https"
         ))),
         other => Err(CloudError::Url(format!(
             "{other} is not a scheme penv speaks"
         ))),
+    }
+}
+
+/// The host out of an authority, brackets and all for an IPv6 literal.
+fn host_of(authority: &str) -> &str {
+    match authority.strip_prefix('[') {
+        Some(rest) => match rest.find(']') {
+            Some(end) => &authority[..end + 2],
+            None => "",
+        },
+        None => authority.split(':').next().unwrap_or_default(),
     }
 }
 
@@ -723,11 +861,16 @@ fn bearer_of(url: &str, body: &Value, now: u64) -> Result<Bearer> {
             url: url.to_string(),
             reason: "no credential in the answer".into(),
         })?;
+    // The contract sends an ISO-8601 expiresAt; expiresIn is only a fallback.
     let expires_at = body
-        .get("expiresIn")
-        .and_then(Value::as_u64)
-        .map(|seconds| now + seconds)
-        .or_else(|| body.get("expiresAt").and_then(Value::as_u64));
+        .get("expiresAt")
+        .and_then(|at| serde_json::from_value::<Stamp>(at.clone()).ok())
+        .and_then(|stamp| stamp.epoch())
+        .or_else(|| {
+            body.get("expiresIn")
+                .and_then(Value::as_u64)
+                .map(|seconds| now + seconds)
+        });
     Ok(Bearer {
         token: token.to_string(),
         expires_at,
@@ -749,9 +892,78 @@ mod tests {
             "http://127.0.0.1:8787"
         );
         assert!(checked_base_url("http://localhost:1234").is_ok());
+        assert!(checked_base_url("http://[::1]:8787").is_ok());
         assert!(checked_base_url("http://penv.cloud").is_err());
         assert!(checked_base_url("ftp://penv.cloud").is_err());
         assert!(checked_base_url("penv.cloud").is_err());
+    }
+
+    #[test]
+    fn a_host_that_only_looks_like_the_loopback_is_refused() {
+        for raw in [
+            "http://localhost@evil.example",
+            "http://127.0.0.1@evil.example",
+            "https://penv.cloud@evil.example",
+            "http://localhost.evil.example",
+            "http://127.0.0.1.evil.example",
+            "http://evil.example#localhost",
+            "http://evil.example/localhost",
+            "https://",
+        ] {
+            assert!(checked_url(raw).is_err(), "{raw} was let through");
+        }
+    }
+
+    #[test]
+    fn every_segment_of_an_address_is_encoded() {
+        let at = Address::new("acme corp", "api/gateway", "feature/new ui");
+        assert_eq!(at.path(), "acme%20corp/api%2Fgateway/feature%2Fnew%20ui");
+        assert_eq!(
+            at.to_string(),
+            "acme corp/api/gateway/feature/new ui",
+            "what a person reads is not encoded"
+        );
+
+        let key = CloudKey {
+            path: "services/web api".into(),
+            name: "DB URL".into(),
+            ..CloudKey::default()
+        };
+        assert_eq!(key.key_path(), "services/web%20api/DB%20URL");
+        assert_eq!(encode_segment("a-b_c.d~e"), "a-b_c.d~e");
+    }
+
+    #[test]
+    fn an_absent_schema_field_is_absent_and_never_null() {
+        let key = CloudKey {
+            name: "PORT".into(),
+            schema: Some(json!({
+                "type": { "name": "port" },
+                "required": true,
+                "default": Value::Null,
+                "docs": Value::Null,
+            })),
+            ..CloudKey::default()
+        };
+        let schema = &key.to_write()["schema"];
+        assert_eq!(schema.get("default"), None);
+        assert_eq!(schema.get("docs"), None);
+        assert_eq!(schema["required"], true);
+    }
+
+    #[test]
+    fn an_iso_expiry_is_the_one_the_credential_carries() {
+        let body = json!({ "credential": "pck_FAKE", "expiresAt": "2026-09-08T12:34:56Z" });
+        let bearer = bearer_of("https://penv.cloud", &body, 1_000).unwrap();
+        assert_eq!(bearer.expires_at, Some(1_788_870_896));
+
+        let fallback = json!({ "credential": "pck_FAKE", "expiresIn": 900 });
+        assert_eq!(
+            bearer_of("https://penv.cloud", &fallback, 1_000)
+                .unwrap()
+                .expires_at,
+            Some(1_900)
+        );
     }
 
     #[test]

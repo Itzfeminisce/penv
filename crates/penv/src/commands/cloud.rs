@@ -59,11 +59,20 @@ impl Cloud {
             .map_err(|e| refuse(e, None))
     }
 
-    pub fn cache(&self, at: &Address) -> Option<Cache> {
+    /// The cache is sealed against the credential that filled it, so it opens
+    /// for this bearer and no other.
+    pub fn cache(&self, at: &Address, bearer: &Bearer) -> Option<Cache> {
         let dir = self.cache_dir.as_deref()?;
-        Cache::open(dir, self.api.base_url(), at, self.keychain.as_ref())
+        Cache::open(dir, self.api.base_url(), at, bearer, self.keychain.as_ref())
             .ok()
             .flatten()
+    }
+
+    /// Everything this host kept for this server.
+    pub fn forget_cache(&self) {
+        if let Some(dir) = self.cache_dir.as_deref() {
+            penv_cloud::cache::forget(dir, self.api.base_url());
+        }
     }
 }
 
@@ -123,9 +132,31 @@ pub fn refuse(error: CloudError, at: Option<&Address>) -> CliError {
                 "Issue a new enrolment secret in the console and run penv machine enroll again.",
             )
             .with_exit(Exit::Auth),
+            (_, "dynamic") => CliError::new(
+                "dynamic",
+                "that key is minted by an engine; edit it in the console.",
+                "Change the engine it comes from in the console, or push a static key under another name.",
+            )
+            .with_exit(Exit::Validation),
+            (_, "quota_exceeded") => CliError::new(
+                "quota_exceeded",
+                "the plan's project limit is reached.",
+                "Remove a project in the console, or raise the plan.",
+            ),
+            (_, "ambiguous") => CliError::new(
+                "ambiguous",
+                format!("{} names more than one thing on this server.", if where_.is_empty() { "that address" } else { &where_ }),
+                "Rename one of them in the console, then run this again.",
+            ),
+            (401, "expired") => CliError::new(
+                "expired",
+                "your login expired, run penv login.",
+                "Run penv login, or set PENV_TOKEN for a machine.",
+            )
+            .with_exit(Exit::Auth),
             (401, _) => CliError::new(
                 "unauthorized",
-                "the credential was rejected.",
+                "the credential is not accepted by this server.",
                 "Run penv login again, or check PENV_TOKEN.",
             )
             .with_exit(Exit::Auth),
@@ -147,6 +178,12 @@ pub fn refuse(error: CloudError, at: Option<&Address>) -> CliError {
                     None => "the server is rate limiting this identity.".to_string(),
                 },
                 "Wait and try again.",
+            ),
+            // The client already tried a server error a second time.
+            (status, _) if status >= 500 => CliError::new(
+                "server_error",
+                format!("the server answered {status} twice."),
+                "Wait for penv.cloud to come back, then run this again.",
             ),
             (status, code) => CliError::new(
                 "server_refused",

@@ -115,7 +115,14 @@ pub fn unset(
     let bearer = cloud.bearer(env, schema.org.as_deref())?;
     let result = cloud
         .api
-        .key_unset(&bearer, &at, name)
+        .key_unset(
+            &bearer,
+            &at,
+            &CloudKey {
+                name: name.to_string(),
+                ..CloudKey::default()
+            },
+        )
         .map_err(|e| refuse(e, Some(&at)))?;
 
     Ok(Report::new(

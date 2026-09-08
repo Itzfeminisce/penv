@@ -30,7 +30,10 @@ pub fn run(out: &Output, _cwd: &Path, env: &Env, agent_flag: bool) -> Result<Rep
     }
 
     let cloud = Cloud::open(env, &detection)?;
-    let start = cloud.api.device_start().map_err(|e| refuse(e, None))?;
+    let start = cloud
+        .api
+        .device_start(&penv_cloud::api::host_name())
+        .map_err(|e| refuse(e, None))?;
 
     note(&format!("your code is {}", start.user_code));
     note(&format!("open {}", start.verification_uri));
@@ -44,7 +47,7 @@ pub fn run(out: &Output, _cwd: &Path, env: &Env, agent_flag: bool) -> Result<Rep
         .set(penv_cloud::keychain::USER, &grant.credential)
         .map_err(|e| refuse(e, None))?;
 
-    let email = grant.user.as_ref().map(|u| u.email.clone());
+    let email = grant.user.as_ref().and_then(|u| u.email.clone());
     let orgs: Vec<String> = grant.orgs.iter().map(|o| o.slug.clone()).collect();
     let style = out.style();
     let text = format!(
@@ -70,6 +73,9 @@ pub fn run(out: &Output, _cwd: &Path, env: &Env, agent_flag: bool) -> Result<Rep
     ))
 }
 
+/// The longest a poll waits, however long the server asks for.
+const MAX_INTERVAL: u64 = 60;
+
 /// Wait the interval the server named, and lengthen it whenever it says so.
 fn poll(cloud: &Cloud, start: &penv_cloud::DeviceStart) -> Result<penv_cloud::Grant, CliError> {
     let mut interval = start.interval.max(1);
@@ -83,7 +89,10 @@ fn poll(cloud: &Cloud, start: &penv_cloud::DeviceStart) -> Result<penv_cloud::Gr
         {
             DevicePoll::Granted(grant) => return Ok(grant),
             DevicePoll::Pending => {}
-            DevicePoll::SlowDown => interval += 5,
+            // Any 429 is a wait, never a failure: the server says how long.
+            DevicePoll::SlowDown(retry_after) => {
+                interval = retry_after.unwrap_or(interval).clamp(1, MAX_INTERVAL)
+            }
             DevicePoll::Denied => {
                 return Err(CliError::new(
                     "denied",

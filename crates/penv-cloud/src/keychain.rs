@@ -12,6 +12,8 @@ pub const USER: &str = "user";
 pub const CACHE_KEY: &str = "cache-key";
 /// The enrolled Ed25519 key, its credential id and its generation counter.
 pub const KEYPAIR: &str = "keypair";
+/// The key an enrolment made, held from before the request until the answer.
+pub const KEYPAIR_PENDING: &str = "keypair-pending";
 
 /// The account one item is stored under. Two servers never share a credential.
 pub fn account(base_url: &str, item: &str) -> String {

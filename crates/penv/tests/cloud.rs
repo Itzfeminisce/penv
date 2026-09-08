@@ -16,6 +16,9 @@ const SECRET: &str = "sk_test_FAKE0000";
 const TOKEN: &str = "pck_FAKE";
 const PROJECT: &str = "api-gateway";
 const ENVS: &str = "/api/v1/envs/acme/api-gateway/development";
+/// The slug the server derives for this directory. It is not the directory name.
+const SLUG: &str = "api-gateway-2";
+const CREATED_ENVS: &str = "/api/v1/envs/acme/api-gateway-2/development";
 
 const KEYS: &str = "\
 # @type=string(startsWith=sk_)
@@ -176,10 +179,15 @@ fn push_creates_the_project_from_the_directory_and_writes_the_header() {
         200,
         &json!({ "orgs": [{ "slug": "acme", "name": "Acme" }] }).to_string(),
     );
-    mock.on("POST", "/api/v1/orgs/acme/projects", 201, "{}");
+    mock.on(
+        "POST",
+        "/api/v1/orgs/acme/projects",
+        201,
+        &json!({ "slug": SLUG, "name": PROJECT, "environments": ["development"] }).to_string(),
+    );
     mock.on(
         "PUT",
-        ENVS,
+        CREATED_ENVS,
         200,
         &json!({ "written": 2, "unchanged": 0, "pruned": 0, "etag": "\"abc\"" }).to_string(),
     );
@@ -192,7 +200,11 @@ fn push_creates_the_project_from_the_directory_and_writes_the_header() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
 
     let report = json_of(&stdout(&output));
-    assert_eq!(report["created"], format!("acme/{PROJECT}"));
+    assert_eq!(
+        report["created"],
+        format!("acme/{SLUG}"),
+        "the slug the server derived, not the directory name"
+    );
     assert_eq!(report["written"], 2);
     assert_eq!(report["etag"], "\"abc\"");
 
@@ -200,7 +212,7 @@ fn push_creates_the_project_from_the_directory_and_writes_the_header() {
     assert_eq!(created["name"], PROJECT);
     assert_eq!(created["environments"][0], "development");
 
-    let put = mock.last("PUT", ENVS).json();
+    let put = mock.last("PUT", CREATED_ENVS).json();
     assert_eq!(put["prune"], false);
     let sent = put["keys"].as_array().unwrap();
     let secret = sent
@@ -214,11 +226,14 @@ fn push_creates_the_project_from_the_directory_and_writes_the_header() {
         None,
         "the route carries the name"
     );
+    for (field, value) in secret["schema"].as_object().unwrap() {
+        assert!(!value.is_null(), "{field} was sent as null");
+    }
 
     assert!(
         workspace
             .read(".env.schema")
-            .contains(&format!("@penv=acme/{PROJECT}")),
+            .contains(&format!("@penv=acme/{SLUG}")),
         "the header was not written: {}",
         workspace.read(".env.schema")
     );
@@ -510,4 +525,146 @@ fn machine_enroll_needs_a_secret() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(json_of(&stderr(&output))["error"], "no_secret");
     assert!(mock.requests().is_empty(), "it never asked");
+}
+
+#[test]
+fn push_takes_the_org_slug_from_the_listing_not_from_the_flag() {
+    let mock = Mock::new();
+    mock.on(
+        "GET",
+        "/api/v1/orgs",
+        200,
+        &json!({ "orgs": [{ "slug": "acme", "name": "Acme Corp" }] }).to_string(),
+    );
+    mock.on(
+        "POST",
+        "/api/v1/orgs/acme/projects",
+        201,
+        &json!({ "slug": SLUG, "name": PROJECT }).to_string(),
+    );
+    mock.on(
+        "PUT",
+        CREATED_ENVS,
+        200,
+        &json!({ "written": 1, "unchanged": 0, "pruned": 0, "etag": "\"abc\"" }).to_string(),
+    );
+
+    let workspace = Workspace::new(&[
+        (".env.schema", &local_schema()),
+        (
+            ".env",
+            "PORT=3000
+",
+        ),
+    ]);
+    let output = workspace.run(&mock, &["--json", "push", "--org", "Acme Corp"]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(json_of(&stdout(&output))["created"], format!("acme/{SLUG}"));
+    assert!(
+        workspace
+            .read(".env.schema")
+            .contains(&format!("@penv=acme/{SLUG}")),
+        "{}",
+        workspace.read(".env.schema")
+    );
+}
+
+#[test]
+fn a_key_an_engine_mints_says_where_it_is_edited() {
+    let mock = Mock::new();
+    mock.on(
+        "PATCH",
+        &format!("{ENVS}/keys/PORT"),
+        409,
+        &json!({ "error": "dynamic" }).to_string(),
+    );
+    let workspace = Workspace::new(&[(".env.schema", &cloud_schema())]);
+    let output = workspace.pipe(
+        &mock,
+        &["--json", "set", "PORT"],
+        "4000
+",
+    );
+
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    let error = json_of(&stderr(&output));
+    assert_eq!(error["error"], "dynamic");
+    assert!(
+        error["message"].as_str().unwrap().contains("console"),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_expired_login_says_to_sign_in_again() {
+    let mock = Mock::new();
+    mock.on("GET", ENVS, 401, &json!({ "error": "expired" }).to_string());
+    let workspace = Workspace::new(&[(".env.schema", &cloud_schema())]);
+    let output = workspace.run(&mock, &["--json", "pull", "--i-am-human"]);
+
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    let error = json_of(&stderr(&output));
+    assert_eq!(error["error"], "expired");
+    assert!(
+        error["message"].as_str().unwrap().contains("penv login"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_project_over_the_plan_limit_says_what_the_limit_is() {
+    let mock = Mock::new();
+    mock.on(
+        "GET",
+        "/api/v1/orgs",
+        200,
+        &json!({ "orgs": [{ "slug": "acme", "name": "Acme" }] }).to_string(),
+    );
+    mock.on(
+        "POST",
+        "/api/v1/orgs/acme/projects",
+        409,
+        &json!({ "error": "quota_exceeded" }).to_string(),
+    );
+    let workspace = Workspace::new(&[
+        (".env.schema", &local_schema()),
+        (
+            ".env",
+            "PORT=3000
+",
+        ),
+    ]);
+    let output = workspace.run(&mock, &["--json", "push"]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    // The note about what push would create comes first; the refusal is the last line.
+    let error = json_of(stderr(&output).lines().next_back().unwrap_or_default());
+    assert_eq!(error["error"], "quota_exceeded");
+    assert!(
+        error["message"].as_str().unwrap().contains("plan"),
+        "{error}"
+    );
+    assert!(
+        !workspace.read(".env.schema").contains("@penv="),
+        "no header for a project that was never created"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pulled_env_file_is_readable_only_by_this_account() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mock = Mock::new();
+    mock.on("GET", ENVS, 200, &values_body());
+    let workspace = Workspace::new(&[(".env.schema", &cloud_schema())]);
+    let output = workspace.run(&mock, &["--json", "pull", "--i-am-human"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+
+    let mode = std::fs::metadata(workspace.path().join(".env"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "{mode:o}");
 }

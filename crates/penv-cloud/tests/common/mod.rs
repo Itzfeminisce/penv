@@ -163,6 +163,7 @@ fn serve(stream: TcpStream, state: &Arc<Mutex<State>>) -> std::io::Result<()> {
         reader.read_exact(&mut body)?;
     }
 
+    let asked_for = headers.get("if-none-match").cloned();
     let canned = {
         let mut state = state.lock().unwrap();
         state.log.push(Recorded {
@@ -179,11 +180,22 @@ fn serve(stream: TcpStream, state: &Arc<Mutex<State>>) -> std::io::Result<()> {
         }
     };
 
-    let canned = canned.unwrap_or(Canned {
+    let mut canned = canned.unwrap_or(Canned {
         status: 404,
         headers: Vec::new(),
         body: "{\"error\":\"not_found\"}".into(),
     });
+
+    // The real server honours If-None-Match: a read whose ETag still matches is
+    // a 304, whatever body was queued behind it.
+    let etag = canned
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
+        .map(|(_, value)| value.as_str());
+    if canned.status == 200 && etag.is_some() && asked_for.as_deref() == etag {
+        canned.status = 304;
+    }
 
     // A HEAD or a 304 carries headers and nothing else.
     let empty = method == "HEAD" || canned.status == 304;
@@ -219,6 +231,8 @@ fn reason(status: u16) -> &'static str {
         410 => "Gone",
         428 => "Precondition Required",
         429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "Error",
     }
 }

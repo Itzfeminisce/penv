@@ -136,7 +136,14 @@ fn cloud_state(env: &Env, detection: &Detection, org: &str, project: &str) -> (b
     };
     let held = penv_cloud::credential::present(env.as_map(), opened.keychain.as_ref());
     let at = penv_cloud::Address::new(org, project, cloud::DEFAULT_ENVIRONMENT);
-    let age = opened.cache(&at).and_then(|cache| cache.age(opened.now));
+    // The cache opens for the credential that filled it, so only a person's own
+    // login can say how old it is.
+    let age = opened
+        .user()
+        .ok()
+        .flatten()
+        .and_then(|bearer| opened.cache(&at, &bearer))
+        .and_then(|cache| cache.age(opened.now));
     (held, age)
 }
 

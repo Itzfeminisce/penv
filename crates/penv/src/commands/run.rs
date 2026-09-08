@@ -139,7 +139,7 @@ fn cloud_values(
     let at = cloud::address(schema, environment)?;
     let opened = cloud::Cloud::open(process_env, detection)?;
     let bearer = opened.bearer(process_env, schema.org.as_deref())?;
-    let cache = opened.cache(&at);
+    let cache = opened.cache(&at, &bearer);
     let resolved = penv_cloud::cache::fetch(&opened.api, &bearer, &at, cache.as_ref(), opened.now)
         .map_err(|e| cloud::refuse(e, Some(&at)))?;
 

@@ -28,6 +28,11 @@ fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// The credential every cache in this file is sealed against.
+fn holder() -> Bearer {
+    Bearer::new("pck_FAKE")
+}
+
 fn address() -> Address {
     Address::new("acme", "api", "development")
 }
@@ -87,13 +92,17 @@ fn a_held_oidc_token_is_exchanged_for_a_short_lived_credential() {
         "POST",
         "/api/v1/auth/oidc",
         200,
-        &json!({ "credential": "pck_EXCHANGED", "expiresIn": 900 }).to_string(),
+        &json!({ "credential": "pck_EXCHANGED", "expiresAt": "2026-09-08T12:34:56Z" }).to_string(),
     );
     let oidc = Oidc::from_env(&env(&[("PENV_OIDC_TOKEN", "jwt_FAKE")]), Some("acme")).unwrap();
     let bearer = oidc.obtain(&api(&mock), NOW).unwrap();
 
     assert_eq!(bearer.token, "pck_EXCHANGED");
-    assert_eq!(bearer.expires_at, Some(NOW + 900));
+    assert_eq!(
+        bearer.expires_at,
+        Some(1_788_870_896),
+        "the ISO instant is the expiry, not a guess from the clock"
+    );
     assert_eq!(
         mock.last("POST", "/api/v1/auth/oidc").json(),
         json!({ "token": "jwt_FAKE" })
@@ -307,6 +316,11 @@ fn enrolling_stores_the_key_the_public_half_was_sent_for() {
     let der = b64::decode(sent["publicKey"].as_str().unwrap()).expect("base64 DER");
     assert_eq!(der.len(), 44, "SPKI DER for Ed25519");
     assert!(store.get(keychain::KEYPAIR).unwrap().is_some());
+    assert_eq!(
+        store.get(keychain::KEYPAIR_PENDING).unwrap(),
+        None,
+        "the pending key is finalised, not left behind"
+    );
 }
 
 #[test]
@@ -352,11 +366,12 @@ fn the_device_flow_waits_slows_down_and_then_lands() {
         428,
         &json!({ "error": "authorization_pending" }).to_string(),
     );
-    mock.on(
+    mock.on_with(
         "POST",
         "/api/v1/auth/device/token",
         429,
         &json!({ "error": "slow_down" }).to_string(),
+        &[("Retry-After", "7")],
     );
     mock.on(
         "POST",
@@ -364,6 +379,7 @@ fn the_device_flow_waits_slows_down_and_then_lands() {
         201,
         &json!({
             "credential": "pcu_FAKE",
+            "expiresAt": "2026-09-08T12:34:56Z",
             "user": { "email": "dev@example.com" },
             "orgs": [{ "slug": "acme", "name": "Acme" }]
         })
@@ -371,9 +387,14 @@ fn the_device_flow_waits_slows_down_and_then_lands() {
     );
 
     let api = api(&mock);
-    let start = api.device_start().unwrap();
+    let start = api.device_start("workshop-laptop").unwrap();
     assert_eq!(start.user_code, "WXYZ-1234");
     assert_eq!(start.interval, 5);
+    assert_eq!(
+        mock.last("POST", "/api/v1/auth/device").json()["device"],
+        "workshop-laptop",
+        "the approval page names the machine"
+    );
 
     assert!(matches!(
         api.device_poll(&start.device_code).unwrap(),
@@ -381,13 +402,20 @@ fn the_device_flow_waits_slows_down_and_then_lands() {
     ));
     assert!(matches!(
         api.device_poll(&start.device_code).unwrap(),
-        DevicePoll::SlowDown
+        DevicePoll::SlowDown(Some(7))
     ));
     let DevicePoll::Granted(grant) = api.device_poll(&start.device_code).unwrap() else {
         panic!("the third poll lands");
     };
     assert_eq!(grant.credential, "pcu_FAKE");
-    assert_eq!(grant.user.unwrap().email, "dev@example.com");
+    assert_eq!(
+        grant.user.unwrap().email.as_deref(),
+        Some("dev@example.com")
+    );
+    assert_eq!(
+        grant.expires_at.and_then(|at| at.epoch()),
+        Some(1_788_870_896)
+    );
     assert_eq!(grant.orgs[0].slug, "acme");
     assert_eq!(
         mock.last("POST", "/api/v1/auth/device/token").json()["deviceCode"],
@@ -498,7 +526,7 @@ fn push_and_the_per_key_writes_speak_the_documented_shapes() {
         4
     );
     assert_eq!(
-        api.key_unset(&bearer, &address(), "PORT").unwrap().etag,
+        api.key_unset(&bearer, &address(), &keys[0]).unwrap().etag,
         "\"ghi\""
     );
 }
@@ -519,7 +547,12 @@ fn orgs_and_projects_are_read_and_created() {
         &json!({ "projects": [{ "slug": "api", "name": "api", "environments": ["development"] }] })
             .to_string(),
     );
-    mock.on("POST", "/api/v1/orgs/acme/projects", 201, "{}");
+    mock.on(
+        "POST",
+        "/api/v1/orgs/acme/projects",
+        201,
+        &json!({ "slug": "api-2", "name": "API", "environments": ["development"] }).to_string(),
+    );
 
     let api = api(&mock);
     let bearer = Bearer::new("pcu_FAKE");
@@ -528,10 +561,12 @@ fn orgs_and_projects_are_read_and_created() {
         api.projects(&bearer, "acme").unwrap()[0].environments,
         ["development"]
     );
-    api.create_project(&bearer, "acme", "api", &["development".to_string()])
+    let created = api
+        .create_project(&bearer, "acme", "API", &["development".to_string()])
         .unwrap();
+    assert_eq!(created.slug, "api-2", "the server derives the slug");
     let sent = mock.last("POST", "/api/v1/orgs/acme/projects").json();
-    assert_eq!(sent["name"], "api");
+    assert_eq!(sent["name"], "API");
     assert_eq!(sent["environments"][0], "development");
 }
 
@@ -549,7 +584,7 @@ fn entry(at: u64) -> Entry {
 fn a_cache_file_round_trips_and_belongs_to_one_address_only() {
     let dir = scratch();
     let store = MemoryKeychain::new();
-    let cache = Cache::open(&dir, "https://penv.cloud", &address(), &store)
+    let cache = Cache::open(&dir, "https://penv.cloud", &address(), &holder(), &store)
         .unwrap()
         .expect("a keychain means a cache");
     cache.write(&entry(NOW)).unwrap();
@@ -565,6 +600,7 @@ fn a_cache_file_round_trips_and_belongs_to_one_address_only() {
         &dir,
         "https://penv.cloud",
         &Address::new("acme", "api", "production"),
+        &holder(),
         &store,
     )
     .unwrap()
@@ -573,9 +609,15 @@ fn a_cache_file_round_trips_and_belongs_to_one_address_only() {
     assert!(elsewhere.read().is_none(), "the AAD binds the address");
 
     assert!(
-        Cache::open(&dir, "https://penv.cloud", &address(), &NoKeychain)
-            .unwrap()
-            .is_none(),
+        Cache::open(
+            &dir,
+            "https://penv.cloud",
+            &address(),
+            &holder(),
+            &NoKeychain
+        )
+        .unwrap()
+        .is_none(),
         "no keychain, no cache"
     );
 }
@@ -585,7 +627,7 @@ fn a_fresh_development_cache_asks_the_server_nothing() {
     let dir = scratch();
     let store = MemoryKeychain::new();
     let mock = Mock::new();
-    let cache = Cache::open(&dir, &mock.url(), &address(), &store)
+    let cache = Cache::open(&dir, &mock.url(), &address(), &holder(), &store)
         .unwrap()
         .unwrap();
     cache.write(&entry(NOW)).unwrap();
@@ -607,7 +649,7 @@ fn a_stale_cache_revalidates_with_the_etag_and_only_refetches_when_it_changed() 
     let store = MemoryKeychain::new();
     let mock = Mock::new();
     mock.on("HEAD", ENVS, 304, "");
-    let cache = Cache::open(&dir, &mock.url(), &address(), &store)
+    let cache = Cache::open(&dir, &mock.url(), &address(), &holder(), &store)
         .unwrap()
         .unwrap();
     cache.write(&entry(NOW)).unwrap();
@@ -641,7 +683,7 @@ fn a_changed_environment_is_fetched_again_and_rewritten() {
         &body(&[("PORT", "4000")]),
         &[("ETag", "\"two\"")],
     );
-    let cache = Cache::open(&dir, &mock.url(), &address(), &store)
+    let cache = Cache::open(&dir, &mock.url(), &address(), &holder(), &store)
         .unwrap()
         .unwrap();
     cache.write(&entry(NOW)).unwrap();
@@ -661,7 +703,7 @@ fn offline_development_runs_on_the_cache_and_says_so_once_a_day() {
     let store = MemoryKeychain::new();
     let closed = Mock::closed_url();
     let api = Api::new(&closed).unwrap();
-    let cache = Cache::open(&dir, &closed, &address(), &store)
+    let cache = Cache::open(&dir, &closed, &address(), &holder(), &store)
         .unwrap()
         .unwrap();
     cache.write(&entry(NOW)).unwrap();
@@ -684,7 +726,9 @@ fn offline_fails_closed_everywhere_but_development() {
     let store = MemoryKeychain::new();
     let closed = Mock::closed_url();
     let at = Address::new("acme", "api", "production");
-    let cache = Cache::open(&dir, &closed, &at, &store).unwrap().unwrap();
+    let cache = Cache::open(&dir, &closed, &at, &holder(), &store)
+        .unwrap()
+        .unwrap();
     cache.write(&entry(NOW)).unwrap();
 
     let error = cache
@@ -741,4 +785,156 @@ fn a_schema_only_read_says_so_in_the_query() {
 fn an_empty_environment_reads_as_an_empty_body() {
     let parsed: EnvBody = serde_json::from_str("{}").unwrap();
     assert!(parsed.keys.is_empty() && parsed.skipped.is_empty());
+}
+
+#[test]
+fn polling_backs_off_when_the_ip_ceiling_answers_and_never_gives_up() {
+    let mock = Mock::new();
+    mock.on_with(
+        "POST",
+        "/api/v1/auth/device/token",
+        429,
+        &json!({ "error": "rate_limited" }).to_string(),
+        &[("Retry-After", "31")],
+    );
+    let answer = api(&mock).device_poll("dc_FAKE").unwrap();
+    let DevicePoll::SlowDown(retry_after) = answer else {
+        panic!("the ceiling is a wait, not a failure: {answer:?}");
+    };
+    assert_eq!(retry_after, Some(31));
+}
+
+#[test]
+fn a_server_error_is_tried_once_more_and_then_named() {
+    let mock = Mock::new();
+    mock.on(
+        "GET",
+        ENVS,
+        503,
+        &json!({ "error": "unavailable" }).to_string(),
+    );
+    let error = api(&mock)
+        .env_get(&Bearer::new("pck_FAKE"), &address(), None, true)
+        .unwrap_err();
+    assert_eq!(error.status(), Some(503));
+    assert_eq!(mock.hits("GET", ENVS).len(), 2, "one retry, and only one");
+}
+
+#[test]
+fn every_segment_of_an_address_and_a_key_reaches_the_server_encoded() {
+    let mock = Mock::new();
+    let at = Address::new("acme corp", "api/gateway", "review app");
+    let key = CloudKey {
+        path: "services/web api".into(),
+        name: "DB URL".into(),
+        ..CloudKey::default()
+    };
+    let envs = "/api/v1/envs/acme%20corp/api%2Fgateway/review%20app";
+    mock.on("GET", envs, 200, &json!({ "keys": [] }).to_string());
+    mock.on(
+        "DELETE",
+        &format!("{envs}/keys/services/web%20api/DB%20URL"),
+        200,
+        &json!({ "etag": "\"abc\"" }).to_string(),
+    );
+
+    let api = api(&mock);
+    let bearer = Bearer::new("pcu_FAKE");
+    api.env_get(&bearer, &at, None, true).unwrap();
+    api.key_unset(&bearer, &at, &key).unwrap();
+
+    let paths: Vec<String> = mock.requests().into_iter().map(|r| r.path).collect();
+    assert_eq!(paths[0], envs, "a slug with a space is one segment");
+    assert_eq!(
+        paths[1],
+        format!("{envs}/keys/services/web%20api/DB%20URL"),
+        "unset names the whole key, path first"
+    );
+}
+
+#[test]
+fn a_cache_one_credential_filled_is_shut_to_another() {
+    let dir = scratch();
+    let store = MemoryKeychain::new();
+    let mine = Cache::open(&dir, "https://penv.cloud", &address(), &holder(), &store)
+        .unwrap()
+        .unwrap();
+    mine.write(&entry(NOW)).unwrap();
+    assert!(mine.read().is_some());
+
+    let theirs = Cache::open(
+        &dir,
+        "https://penv.cloud",
+        &address(),
+        &Bearer::new("pck_SOMEONE_ELSE"),
+        &store,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(theirs.path(), mine.path(), "the same file on disk");
+    assert!(
+        theirs.read().is_none(),
+        "another credential must not open it"
+    );
+}
+
+#[test]
+fn signing_out_takes_this_server_s_cache_with_it() {
+    let dir = scratch();
+    let store = MemoryKeychain::new();
+    let mine = Cache::open(&dir, "https://penv.cloud", &address(), &holder(), &store)
+        .unwrap()
+        .unwrap();
+    let elsewhere = Cache::open(&dir, "https://other.example", &address(), &holder(), &store)
+        .unwrap()
+        .unwrap();
+    mine.write(&entry(NOW)).unwrap();
+    elsewhere.write(&entry(NOW)).unwrap();
+
+    cache::forget(&dir, "https://penv.cloud");
+    assert!(
+        !mine.path().exists(),
+        "the file is gone, not just unreadable"
+    );
+    assert!(
+        elsewhere.path().exists(),
+        "another server keeps its own cache"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_cache_file_is_readable_only_by_this_account() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = scratch();
+    let store = MemoryKeychain::new();
+    let cache = Cache::open(&dir, "https://penv.cloud", &address(), &holder(), &store)
+        .unwrap()
+        .unwrap();
+    cache.write(&entry(NOW)).unwrap();
+    let mode = std::fs::metadata(cache.path())
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+}
+
+#[test]
+fn an_enrolment_that_never_lands_leaves_no_key_behind() {
+    let mock = Mock::new();
+    mock.on(
+        "POST",
+        "/api/v1/auth/keypair/enroll",
+        401,
+        &json!({ "error": "unauthorized" }).to_string(),
+    );
+    let store = MemoryKeychain::new();
+    assert!(credential::enroll(&api(&mock), &store, "pce_secret_FAKE").is_err());
+    assert_eq!(store.get(keychain::KEYPAIR).unwrap(), None);
+    assert_eq!(
+        store.get(keychain::KEYPAIR_PENDING).unwrap(),
+        None,
+        "the pending key is cleared"
+    );
 }

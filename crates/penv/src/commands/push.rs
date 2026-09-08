@@ -47,14 +47,15 @@ pub fn run(
         note(&format!(
             "{SCHEMA_FILE} names no project, so penv will create {org}/{name} with environment development and write the header."
         ));
-        cloud
+        // The header carries the slug the server derived, never the directory name.
+        let project = cloud
             .api
             .create_project(&bearer, &org, &name, &["development".to_string()])
             .map_err(|e| refuse(e, None))?;
         schema.org = Some(org.clone());
-        schema.project = Some(name.clone());
+        schema.project = Some(project.slug.clone());
         write_file(&schema_path, &penv_schema::render(&schema))?;
-        Some(format!("{org}/{name}"))
+        Some(format!("{org}/{}", project.slug))
     };
 
     let at = address(&schema, &environment(env_flag, env))?;
@@ -108,13 +109,34 @@ pub fn run(
     ))
 }
 
-/// `--org`, else the one org this person has. Several without a flag is a
-/// refusal that lists them.
+/// `--org`, else the one org this person has, as the listing spells it. Several
+/// without a flag is a refusal that lists them.
 fn pick_org(cloud: &Cloud, bearer: &Bearer, flag: Option<&str>) -> Result<String, CliError> {
-    if let Some(org) = flag.filter(|v| !v.is_empty()) {
-        return Ok(org.to_string());
-    }
     let orgs = cloud.api.orgs(bearer).map_err(|e| refuse(e, None))?;
+    if let Some(asked) = flag.filter(|v| !v.is_empty()) {
+        return orgs
+            .iter()
+            .find(|org| {
+                org.slug.eq_ignore_ascii_case(asked) || org.name.eq_ignore_ascii_case(asked)
+            })
+            .map(|org| org.slug.clone())
+            .ok_or_else(|| {
+                CliError::new(
+                    "no_such_org",
+                    format!("this account is in no organisation called {asked}."),
+                    match orgs.is_empty() {
+                        true => "Create one in the console, then run penv push again.".to_string(),
+                        false => format!(
+                            "Pass one of: {}.",
+                            orgs.iter()
+                                .map(|o| o.slug.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    },
+                )
+            });
+    }
     match orgs.len() {
         1 => Ok(orgs[0].slug.clone()),
         0 => Err(CliError::new(
