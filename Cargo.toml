@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "1.0.0-alpha.1"
+version = "1.0.0-alpha.2"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Itzfeminisce/penvhq"
@@ -16,10 +16,10 @@ serde_json = "1"
 toml = "0.9"
 minijinja = { version = "2.24", default-features = false, features = ["builtins", "macros", "serde"] }
 thiserror = "2"
-penv-agent = { path = "crates/penv-agent", version = "1.0.0-alpha.1" }
-penv-mask = { path = "crates/penv-mask", version = "1.0.0-alpha.1" }
-penv-schema = { path = "crates/penv-schema", version = "1.0.0-alpha.1" }
-penv-dotenv = { path = "crates/penv-dotenv", version = "1.0.0-alpha.1" }
-penv-targets = { path = "crates/penv-targets", version = "1.0.0-alpha.1" }
-penv-guards = { path = "crates/penv-guards", version = "1.0.0-alpha.1" }
-penv-cloud = { path = "crates/penv-cloud", version = "1.0.0-alpha.1" }
+penv-agent = { path = "crates/penv-agent" }
+penv-mask = { path = "crates/penv-mask" }
+penv-schema = { path = "crates/penv-schema" }
+penv-dotenv = { path = "crates/penv-dotenv" }
+penv-targets = { path = "crates/penv-targets" }
+penv-guards = { path = "crates/penv-guards" }
+penv-cloud = { path = "crates/penv-cloud" }
