@@ -49,7 +49,9 @@ Rules:
 - One concept, one name. No aliases. Unknown decorators are an error from `check`.
 - Nearest `.env.schema` upward from the working directory wins. A monorepo holds one per app.
 
-The generated `.env` (from `pull`, or the developer's own in local mode) is plain: UTF-8 without BOM, LF, `KEY=value`, upper snake case keys, no `export`, no spaces around `=`, quotes only when needed, no `$`, no escapes, no duplicates, no multi-line values, no comments emitted. That is the subset every parser in the research agrees on.
+The generated `.env` (from `pull`, or the developer's own in local mode) is plain: UTF-8 without BOM, LF, `KEY=value`, upper snake case keys, no `export`, no spaces around `=`, quotes only when needed, no `$`, no duplicates, no comments emitted.
+
+Quoting is the subset Node's `util.parseEnv` and dotenv both read back, and no more: **inside double quotes, `\n` is an escape and nothing else is**. That is how a multi-line value such as a PEM key sits on one line. So the writer folds `\r\n` into `\n`, double-quotes a value that breaks lines escaping those newlines, and refuses it outright when it also holds a `"`, a `\` or a carriage return of its own, because none of those has a portable escape. A value holding a `"` or a `\` and no line break is single-quoted, where nothing is an escape, and is refused when it also holds a `'`. A value goes bare only when it holds no whitespace at all, no `#`, no quote and no backslash; anything else in between is double-quoted with nothing to escape. The reader still decodes `\r`, `\t`, `\"` and `\\` so a file another tool wrote is read rather than mangled, and warns once per value, naming the line and the column and never the character.
 
 ## 3. State machine
 
@@ -65,7 +67,7 @@ cloud   @penv header, credential in the keychain, .env absent (or present only a
 | Command | Does | Fires automatically when |
 |---|---|---|
 | `penv` | Prints state and the one next command | no args |
-| `init` | Reads `.env`, writes `.env.schema`, gitignores `.env`, prints what it inferred; never prompts. Every key is sensitive and required unless bundler-prefixed. A value is copied into the schema as a default only when the key is bundler-prefixed, or the value is a boolean, an integer, a lowercase word of letters, or a localhost URL with no userinfo and no query | `run` finds a `.env` with no schema |
+| `init` | Reads `.env` (writing an empty one when there is none), writes `.env.schema`, gitignores `.env`, prints what it inferred. Every key is sensitive and required unless bundler-prefixed. A value is copied into the schema as a default only when the key is bundler-prefixed, or the value is a boolean, an integer, a lowercase word of letters, a lowercase slug of at most 32 characters whose segments are joined by `-`, `_` or `.` and where one segment is letters only and no segment carrying a digit runs past four characters (`us-east-1`, `gpt-4o`, `api.internal`, never `a3f9c2d4e5b6`), or a localhost URL with no userinfo and no query. A key named for what it holds keeps its value out however dull it reads and whatever prefix it carries, so `NEXT_PUBLIC_SUPABASE_ANON_KEY` is not copied either: the words are `AUTH`, `KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD`, `PASSPHRASE`, `PASS`, `PWD`, `PW`, `CREDENTIAL`, `CRED`, `DSN`, `SALT`, `SEED` and `SIGNATURE`, each matching the word itself or a plural of it in `S` or `ES`; sensitivity still follows the prefix, since a bundler-prefixed value reaches the browser either way. At a terminal, with no agent, it offers a picker over every harness penv knows with the installed ones already chosen; `--guards <NAMES>` (trimmed, deduped, and none when it names nothing) and `--no-guards` decide it without a prompt, and every other run guards the installed set. It then generates for every target this repository uses, resolving the output the way `gen` does; `--output <PATH>` names the file instead, and only when one target applies | `run` finds a `.env` with no schema |
 | `run [--env E] -- cmd` | Validates, injects into the child only, masks child output when an agent is present | never |
 | `push` | Moves local values to the cloud, deletes `.env` | `init` when logged in, as an offer |
 | `pull` | Writes a plain `.env` | never |
@@ -73,7 +75,7 @@ cloud   @penv header, credential in the keychain, .env absent (or present only a
 | `set KEY` / `unset KEY` | Prompted or piped write, never echoed | never |
 | `ls` | Names, types, presence; values masked; JSON when stdout is not a TTY | never |
 | `check [KEY]` | Schema validity, missing values, why a key fails, guard status | `run` before exec; `init` after import |
-| `gen <target>` | Writes the typed file for a language target | `init`/`push` when a target's detect files exist |
+| `gen <target>` | Writes the typed file for a language target and prints how to import it. `--out <PATH>` says where; without it penv asks at a terminal and skips anywhere else. Either answer is remembered. No target lists them with the directories they were detected in | `init`/`push` when a directory holds a target's detect file |
 | `guard [--check]` | Writes every recognised harness config; `--check` reports coverage | `init`; any command that detects a new harness |
 | `reveal KEY` | Prints one value after console approval | never; refused outright in an agent session |
 | `machine enroll <secret>` | Binds a server keypair from a one-time secret | never |
@@ -126,11 +128,51 @@ The hook binary is `penv` itself (`penv hook claude-code`), never a script needi
 ## 7. Language targets
 
 ```text
-targets/<name>/target.toml   name, output path, detect files, [types] map, [options] table
+targets/<name>/target.toml   name, output path, detect files, [types] map, [options] table,
+                             [[suggest]] knobs, [[layout]] shapes, import line,
+                             optional [check] command
 targets/<name>/env.tmpl      minijinja template over the schema JSON
 ```
 
-Lookup order: `.penv/targets/<name>/` in the repo, `~/.penv/targets/<name>/`, built in (ts, py). Same layout in all three. Targets receive `penv schema --json` and nothing else: no values, no network. Whatever `[options]` holds reaches the template as `options`, unread by Rust, so a folder names its own knobs; `ts` takes `key_case = "upper" | "camel"` for the property names it exports, and a key with a default in the schema reads through it (`process.env.PORT ?? "3000"`) instead of widening to `| undefined`. One fixture schema is snapshot-rendered through every target in CI; `gen --check` compiles the output when the toolchain is present.
+Lookup order: `.penv/targets/<name>/` in the repo, `~/.penv/targets/<name>/`, built in (ts, py). Same layout in all three, and the order is read through rather than winner-takes-all: a folder holding only a `target.toml` inherits the template from the next place, and a field that file does not set is inherited the same way, key by key inside a table as well, so an override naming one `output` or one `[options]` knob keeps the `[types]` map, the other knobs, the `[check]` command and the template it was going to use anyway. A folder holding an `env.tmpl` and no `target.toml` overrides nothing and is refused as the typo it is. `Target.source` is where the `target.toml` came from, and `Target.output_source` is where the `output` field came from, which is not always the same folder.
+
+### Ask, never guess
+
+Two things decide where a generated file goes, and nothing else ever does:
+
+1. an explicit `--out` (`gen`) or `--output` (`init`), relative to the repository root;
+2. the remembered repo override, but only when it names `output`.
+
+Detection has two jobs and no third. It says whether a target is relevant to this repository at all, and it offers directories to choose from. A directory holding **any one** of the names in `detect` counts, walking three levels deep and skipping `node_modules`, `dist`, `build`, `target` and every directory whose name starts with a dot, which is how `.git` and `.next` are skipped without naming them. `ts` detects `package.json` or `tsconfig.json`; `py` detects `pyproject.toml`, `requirements.txt`, `setup.py` or `Pipfile`. A workspace root is a suggestion like any other, never a verdict about anything, and it is offered last: the rest come shallowest first, by name, so Enter in a monorepo lands on a package.
+
+With neither source, at a terminal with no agent, penv asks once per relevant target:
+
+```text
+#  PATH
+1  apps/web/src/env.ts
+2  apps/api/src/env.ts
+
+where should env.ts go? [apps/web/src/env.ts] (Enter, number, path, none):
+```
+
+The table is shown only when there is more than one suggestion. The default in brackets is the first suggestion joined with the target's `output`; Enter takes it, a number takes another off the list, a typed path is used as written relative to the repository root, and `none` skips the target. With neither source and nobody to ask, penv writes nothing for that target and reports it skipped, with the reason `pass --output <PATH>` (`--out` under `gen`). `gen --check` never asks either, and reports the same skip with exit 0.
+
+The answer is remembered in `.penv/targets/<name>/target.toml` as the smallest override that says it — `name`, `output`, and an `[options]` block only for a knob that differs from the target's default — so a repository is asked once, ever. That holds for an explicit flag too, and for an answer that happens to equal the built-in default, because it was still an answer. A folder that says more than that, or that carries a `#` comment line, was written by hand and is never rewritten. `.penv/targets` is committed. Only the generated file moves: `.env.schema` and the gitignore stay at the root. A path outside the repository is refused rather than written, whether it arrived as an absolute path or as a `..`, and `.` and `..` are taken out of a path before anything downstream sees it.
+
+A `[[layout]]` block shapes the output inside a chosen package: `when` is a path under the package holding one `/*/`, where the `*` stands for a directory name, `output` reads the same name back, and `root` is the directory the language imports from. A `when` with no `/*/` in it matches nothing and is refused when the folder loads. `py` uses one for src layouts, so a package holding `src/billing/__init__.py` is offered `src/billing/penv_env.py` and imports `from billing.penv_env import env`.
+
+penv never edits a `tsconfig.json`, a `package.json` or any other build config. It prints the import line instead, from the `import` the target names: `{specifier}` is the path the language imports by and `{module}` its dotted form. When the target names a `paths_from` file, penv follows its relative `extends` chain, resolves each `paths` target against the effective `baseUrl`, and prints the alias when one is proven to reach the output; otherwise it prints the relative import.
+
+Targets receive `penv schema --json` and nothing else: no values, no network. Whatever `[options]` holds reaches the template as `options`, unread by Rust, so a folder names its own knobs. A `[[suggest]]` block asks penv to work one out from the chosen package: `option` names the `[options]` key (its entry there is the default), and each `[[suggest.rule]]` carries the `value` it sets outright, from the `files` — optionally with the text they must `contain` — that imply it. A rule naming neither `files` nor `contains` is refused when the folder loads. `contains` reads only the lines of a file that are not its own comments, so a dependency somebody commented out is not one. The prompt offers the default first and then each rule's value once. penv asks only where a rule and the default disagree, and takes the default silently when nobody is there to ask; a `contains` rule never settles a knob unasked, so a non-interactive run remembers the path alone:
+
+```text
+which runtime reads the env? [vite] (node, vite, deno):
+use pydantic types? [true] (false, true):
+```
+
+`ts` takes `key_case = "upper" | "camel"` for the property names it exports, and `runtime = "node" | "vite" | "deno"` for the one accessor the whole file reads through (`process.env[key]`, `import.meta.env[key]`, `Deno.env.get(key)`); a `vite.config.*` or a `deno.json` in the chosen package suggests the runtime. A key with a default in the schema reads through the accessor (`read("PORT") ?? "3000"`) instead of widening to `| undefined`, and the Standard Schema validator returns the typed `env`. `py` renders on the standard library alone, and `pydantic = true` swaps `HttpUrl` and `SecretStr` back in; a `pyproject.toml` listing pydantic suggests it.
+
+One fixture schema is snapshot-rendered through every target in CI. `gen --check` compiles the output when the toolchain is present, and says which tool it looked for when it is not. `[check] command` and `probe` may offer alternatives in their first element as `python3|python|py`, and the first that both resolves and answers the probe wins; `[check] bin` names directories under the chosen package looked in before PATH, which is how `ts` finds a project's own `node_modules/.bin/tsc`. Resolution is PATHEXT-aware, so `tsc` finds `tsc.cmd` on Windows and not the shell script beside it. `[check.files]` carries whatever globals the output needs to compile.
 
 ## 8. Cloud
 

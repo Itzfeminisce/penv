@@ -69,19 +69,32 @@ impl Workspace {
     /// The binary with nothing of this machine around it: no PATH to find a
     /// harness on and a home directory of its own.
     fn penv(&self, args: &[&str]) -> Output {
-        self.spawn(args, None)
+        self.spawn(args, None, false)
+    }
+
+    /// The same, with this machine's PATH, for the one command that looks for a
+    /// toolchain on purpose.
+    fn penv_with_tools(&self, args: &[&str]) -> Output {
+        self.spawn(args, None, true)
     }
 
     fn hook(&self, args: &[&str], payload: &str) -> Output {
-        self.spawn(args, Some(payload))
+        self.spawn(args, Some(payload), false)
     }
 
-    fn spawn(&self, args: &[&str], payload: Option<&str>) -> Output {
+    fn spawn(&self, args: &[&str], payload: Option<&str>, tools: bool) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_penv"));
         command
             .current_dir(&self.0)
             .args(args)
-            .env("PATH", "")
+            .env(
+                "PATH",
+                if tools {
+                    std::env::var("PATH").unwrap_or_default()
+                } else {
+                    String::new()
+                },
+            )
             .env("HOME", &self.0)
             .env("USERPROFILE", &self.0)
             .stdin(Stdio::piped())
@@ -116,6 +129,16 @@ fn json(output: &Output) -> Value {
         .unwrap_or_else(|e| panic!("not JSON: {e}\n{}\n{}", stdout(output), stderr(output)))
 }
 
+fn target(report: &Value, name: &str) -> Value {
+    report["targets"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .find(|t| t["name"] == name)
+        .unwrap_or_else(|| panic!("no {name} row in {report}"))
+        .clone()
+}
+
 fn status(report: &Value, harness: &str) -> String {
     report["harnesses"]
         .as_array()
@@ -147,6 +170,223 @@ fn init_generates_a_target_that_is_only_a_folder() {
     );
     let written = std::fs::read_to_string(workspace.path("env.go")).expect("env.go");
     assert!(written.contains("// PORT int"), "{written}");
+}
+
+#[test]
+fn init_with_no_dotenv_leaves_an_empty_one_to_fill_in() {
+    let workspace = Workspace::new(&[]);
+    let output = workspace.penv(&["--json", "init"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+
+    let report = json(&output);
+    assert_eq!(report["createdDotenv"], true);
+    assert!(report["keys"].as_array().unwrap().is_empty(), "{report}");
+    assert_eq!(
+        std::fs::read_to_string(workspace.path(".env")).expect(".env"),
+        ""
+    );
+    assert!(workspace.path(".env.schema").is_file());
+
+    let again = json(&workspace.penv(&["--json", "init", "--force"]));
+    assert_eq!(again["createdDotenv"], false, "the second run found one");
+}
+
+#[test]
+fn init_guards_what_the_flags_name_and_nothing_else() {
+    let files = [(".env", "PORT=3000\n"), (".claude/settings.json", "{}")];
+
+    let none = Workspace::new(&files);
+    let report = json(&none.penv(&["--json", "init", "--no-guards"]));
+    assert!(report["guards"].as_array().unwrap().is_empty(), "{report}");
+    assert!(report["guarded"].as_array().unwrap().is_empty(), "{report}");
+
+    let named = Workspace::new(&files);
+    let report = json(&named.penv(&["--json", "init", "--guards", "cursor"]));
+    assert_eq!(report["guards"], serde_json::json!(["cursor"]));
+    assert!(named.path(".cursor/cli.json").is_file(), "{report}");
+
+    let installed = Workspace::new(&files);
+    let report = json(&installed.penv(&["--json", "init"]));
+    assert_eq!(
+        report["guards"],
+        serde_json::json!(["claude-code"]),
+        "a non-interactive run guards what is installed"
+    );
+
+    let unknown = Workspace::new(&files);
+    let output = unknown.penv(&["--json", "init", "--guards", "nano"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    let error: Value = serde_json::from_str(&stderr(&output)).expect("a JSON error");
+    assert_eq!(error["error"], "unknown_harness");
+
+    let both = Workspace::new(&files);
+    let output = both.penv(&["init", "--guards", "cursor", "--no-guards"]);
+    assert!(!output.status.success(), "the two flags cannot both hold");
+}
+
+#[test]
+fn a_repository_of_two_packages_is_told_where_to_write_and_remembers_it() {
+    let files = [
+        (".env", "PORT=3000\n"),
+        ("package.json", "{}"),
+        ("apps/web/package.json", "{}"),
+        (
+            "apps/web/tsconfig.json",
+            r#"{ "compilerOptions": { "paths": { "@/*": ["./src/*"] } } }"#,
+        ),
+        ("apps/api/package.json", "{}"),
+        ("apps/api/tsconfig.json", "{}"),
+    ];
+    let workspace = Workspace::new(&files);
+
+    // Nothing decided and nobody to ask writes nothing at all.
+    let report = json(&workspace.penv(&["--json", "init", "--no-guards"]));
+    let ts = target(&report, "ts");
+    assert_eq!(ts["status"], "skipped", "{report}");
+    assert_eq!(ts["reason"], "pass --output <PATH>", "{report}");
+    assert!(
+        report["generated"].as_array().unwrap().is_empty(),
+        "{report}"
+    );
+    assert!(!workspace.path(".penv/targets/ts/target.toml").exists());
+
+    let told = workspace.penv(&["--json", "gen", "ts", "--out", "apps/web/src/env.ts"]);
+    let written = json(&told);
+    assert_eq!(told.status.code(), Some(0), "{}", stderr(&told));
+    assert!(workspace.path("apps/web/src/env.ts").is_file(), "{written}");
+    assert_eq!(
+        written["import"], "import { env } from \"@/env\"",
+        "the package's own paths map already reaches the file: {written}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path(".penv/targets/ts/target.toml"))
+            .expect("remembered"),
+        "name = \"ts\"\noutput = \"apps/web/src/env.ts\"\n"
+    );
+
+    // The override carries an output and nothing else, so the target still
+    // renders through the built-in template and is never asked about again.
+    std::fs::remove_file(workspace.path("apps/web/src/env.ts")).expect("the generated file");
+    let again = json(&workspace.penv(&["--json", "gen", "ts"]));
+    assert_eq!(again["source"], "repo", "{again}");
+    assert!(workspace.path("apps/web/src/env.ts").is_file());
+
+    let named = Workspace::new(&files);
+    named.penv(&[
+        "--json",
+        "init",
+        "--no-guards",
+        "--output",
+        "apps/web/env.ts",
+    ]);
+    assert!(named.path("apps/web/env.ts").is_file());
+}
+
+#[test]
+fn the_text_report_says_what_was_skipped_and_counts_keys_in_english() {
+    let one = Workspace::new(&[(".env", "PORT=3000\n"), ("package.json", "{}")]);
+    let text = stdout(&one.penv(&["--format", "text", "init", "--no-guards"]));
+    assert!(
+        text.contains("skipped ts, pass --output <PATH>"),
+        "a target that wrote nothing went unsaid: {text}"
+    );
+    assert!(
+        text.lines().any(|line| line.ends_with("from 1 key")),
+        "{text}"
+    );
+
+    let two = Workspace::new(&[(".env", "PORT=3000\nAPP_NAME=demo\n")]);
+    let text = stdout(&two.penv(&["--format", "text", "init", "--no-guards"]));
+    assert!(
+        text.lines().any(|line| line.ends_with("from 2 keys")),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_path_outside_the_repository_is_refused_and_never_remembered() {
+    let workspace = Workspace::new(&[(".env", "PORT=3000\n"), ("package.json", "{}")]);
+    workspace.penv(&["--json", "init", "--no-guards"]);
+    for args in [
+        vec!["--json", "gen", "ts", "--out", "../escaped/env.ts"],
+        vec![
+            "--json",
+            "init",
+            "--force",
+            "--no-guards",
+            "--output",
+            "../escaped/env.ts",
+        ],
+    ] {
+        let refused = workspace.penv(&args);
+        assert_eq!(refused.status.code(), Some(3), "{}", stdout(&refused));
+        let error: Value = serde_json::from_str(&stderr(&refused)).expect("a JSON error");
+        assert_eq!(error["error"], "output_outside_repo", "{args:?}");
+    }
+    assert!(!workspace.path(".penv/targets/ts/target.toml").exists());
+}
+
+#[test]
+fn a_python_package_needs_nothing_but_a_requirements_file_to_be_offered() {
+    let workspace = Workspace::new(&[
+        (".env", "PORT=3000\n"),
+        ("service/requirements.txt", "flask\n"),
+    ]);
+    let report = json(&workspace.penv(&["--json", "init", "--no-guards"]));
+    let py = target(&report, "py");
+    assert_eq!(py["status"], "skipped", "{report}");
+    assert_eq!(py["reason"], "pass --output <PATH>", "{report}");
+
+    let written = json(&workspace.penv(&["--json", "gen", "py", "--out", "service/penv_env.py"]));
+    assert_eq!(written["import"], "from penv_env import env", "{written}");
+    let source = std::fs::read_to_string(workspace.path("service/penv_env.py")).expect("the file");
+    assert!(
+        !source.contains("pydantic"),
+        "the standard library is the default: {source}"
+    );
+    assert!(source.contains("self.PORT: int"), "{source}");
+    assert_eq!(
+        std::fs::read_to_string(workspace.path(".penv/targets/py/target.toml"))
+            .expect("remembered"),
+        "name = \"py\"\noutput = \"service/penv_env.py\"\n"
+    );
+}
+
+#[test]
+fn a_vite_package_reads_import_meta_and_the_choice_is_remembered() {
+    let workspace = Workspace::new(&[
+        (".env", "PORT=3000\nAPI_URL=https://example.test\n"),
+        ("apps/web/package.json", "{}"),
+        ("apps/web/tsconfig.json", "{}"),
+        ("apps/web/vite.config.ts", "export default {};\n"),
+    ]);
+    workspace.penv(&["--json", "init", "--no-guards"]);
+    let written = json(&workspace.penv(&["--json", "gen", "ts", "--out", "apps/web/src/env.ts"]));
+    let source = std::fs::read_to_string(workspace.path("apps/web/src/env.ts")).expect("the file");
+    assert!(
+        source.contains("import.meta.env[key]"),
+        "{written}\n{source}"
+    );
+    assert!(!source.contains("process.env"), "{source}");
+    assert_eq!(
+        std::fs::read_to_string(workspace.path(".penv/targets/ts/target.toml"))
+            .expect("remembered"),
+        "name = \"ts\"\noutput = \"apps/web/src/env.ts\"\n\n[options]\nruntime = \"vite\"\n"
+    );
+
+    // The toolchain is this machine's business; the check says which it looked
+    // for either way.
+    let checked = workspace.penv_with_tools(&["--json", "gen", "ts", "--check"]);
+    let report = json(&checked);
+    let compiled = &report["compile"];
+    assert!(
+        compiled["status"] == "ok" || compiled["status"] == "skipped",
+        "{report}"
+    );
+    assert!(
+        compiled["detail"].as_str().is_some_and(|d| !d.is_empty()),
+        "a skip has to say why: {report}"
+    );
 }
 
 #[test]
@@ -268,8 +508,16 @@ fn bare_penv_says_the_state_and_nothing_about_credentials() {
 
 #[test]
 fn a_printed_path_uses_one_separator() {
-    let workspace = Workspace::new(&[(".env", "PORT=3000\n"), (".claude/settings.json", "{}")]);
-    let report = json(&workspace.penv(&["--json", "init"]));
+    let workspace = Workspace::new(&[
+        (".env", "PORT=3000\n"),
+        ("package.json", "{}"),
+        (".claude/settings.json", "{}"),
+    ]);
+    let report = json(&workspace.penv(&["--json", "init", "--output", "src/env.ts"]));
+    assert!(
+        !report["generated"].as_array().unwrap().is_empty(),
+        "{report}"
+    );
     for path in report["guarded"]
         .as_array()
         .into_iter()

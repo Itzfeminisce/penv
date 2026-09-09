@@ -11,17 +11,20 @@ pub fn infer(env: &Dotenv) -> Schema {
     for entry in &env.entries {
         let prefixed = is_public_prefixed(&entry.key);
         let ty = infer_type(&entry.key, &entry.value);
-        let copied = !entry.value.is_empty() && (prefixed || is_dull(&entry.value));
+        // A bundler prefix says who may read the key, never that the value is
+        // dull: NEXT_PUBLIC_SUPABASE_ANON_KEY is still a key.
+        let credential = names_a_credential(&entry.key);
+        let copied = !entry.value.is_empty() && !credential && (prefixed || is_dull(&entry.value));
         let default = copied.then(|| entry.value.clone());
+        // The prefix decides sensitivity: the value reaches the browser either way.
         let sensitive = !prefixed && !copied;
-        // Write @sensitive only where the prefix rule alone would not reach the same answer.
-        let inferred_sensitive = !prefixed;
         schema.keys.push(Key {
             name: entry.key.clone(),
             ty,
             required: default.is_none(),
             sensitive,
-            sensitive_decorator: (sensitive != inferred_sensitive).then_some(sensitive),
+            // Written only where the prefix rule alone would not reach the same answer.
+            sensitive_decorator: (!prefixed && !sensitive).then_some(false),
             default,
             ..Key::default()
         });
@@ -29,16 +32,68 @@ pub fn infer(env: &Dotenv) -> Schema {
     schema
 }
 
+/// A key that says what it holds keeps its value out of the schema however dull
+/// the value looks: `STRIPE_SECRET_KEY=sk_test_0000` reads as a slug otherwise.
+fn names_a_credential(key: &str) -> bool {
+    const NAMES: [&str; 16] = [
+        "AUTH",
+        "KEY",
+        "SECRET",
+        "TOKEN",
+        "PASSWORD",
+        "PASSWD",
+        "PASSPHRASE",
+        "PASS",
+        "PWD",
+        "PW",
+        "CREDENTIAL",
+        "CRED",
+        "DSN",
+        "SALT",
+        "SEED",
+        "SIGNATURE",
+    ];
+    // The word itself or its plural, in both spellings: PASSES is PASS.
+    key.split('_').any(|part| {
+        NAMES.contains(&part)
+            || ["ES", "S"].iter().any(|plural| {
+                part.strip_suffix(plural)
+                    .is_some_and(|single| NAMES.contains(&single))
+            })
+    })
+}
+
 /// A value the committed schema may carry: nothing here can be a credential.
 fn is_dull(value: &str) -> bool {
     parse_boolean(value).is_some()
         || value.parse::<i64>().is_ok()
         || is_lowercase_word(value)
+        || is_lowercase_slug(value)
         || is_loopback_url(value)
 }
 
 fn is_lowercase_word(value: &str) -> bool {
     !value.is_empty() && value.chars().all(|c| c.is_ascii_lowercase())
+}
+
+/// `us-east-1`, `gpt-4o`, `api.internal`. One segment is letters only and a
+/// segment carrying a digit stays short, so `a3f9c2d4e5b6` falls out here.
+fn is_lowercase_slug(value: &str) -> bool {
+    if value.len() > 32 || !value.starts_with(|c: char| c.is_ascii_lowercase()) {
+        return false;
+    }
+    let segments: Vec<&str> = value.split(['-', '_', '.']).collect();
+    let shaped = segments.iter().all(|segment| {
+        !segment.is_empty()
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && (segment.len() <= 4 || !segment.chars().any(|c| c.is_ascii_digit()))
+    });
+    shaped
+        && segments
+            .iter()
+            .any(|segment| segment.chars().all(|c| c.is_ascii_lowercase()))
 }
 
 /// `http://localhost:3000` and nothing that could carry a credential in it.

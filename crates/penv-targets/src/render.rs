@@ -169,10 +169,15 @@ mod tests {
         Target {
             name: "fake".into(),
             output: "out".into(),
+            output_source: Source::BuiltIn,
             detect: vec![],
             types,
             options: toml::Table::new(),
+            suggest: Vec::new(),
+            layout: Vec::new(),
             check: None,
+            import: None,
+            paths_from: None,
             template: template.into(),
             source: Source::BuiltIn,
             dir: "built in".into(),
@@ -364,8 +369,9 @@ mod tests {
         for built_in in crate::BUILT_IN {
             parse(
                 built_in.name,
-                built_in.file("target.toml").unwrap(),
+                &toml::from_str(built_in.file("target.toml").unwrap()).unwrap(),
                 built_in.file("env.tmpl").unwrap(),
+                Source::BuiltIn,
                 Source::BuiltIn,
                 "built in",
             )

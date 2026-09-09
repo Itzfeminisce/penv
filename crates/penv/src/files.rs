@@ -114,21 +114,25 @@ pub fn home() -> Option<String> {
     None
 }
 
-/// True when the name resolves to something runnable on PATH.
-pub fn on_path(exe: &str) -> bool {
+/// Every file a name could run, in `dirs` first and then along PATH. Where
+/// PATHEXT says what runs, only those suffixes do: `tsc` beside `tsc.cmd` is a
+/// shell script Windows cannot start.
+pub fn on_path(exe: &str, dirs: &[PathBuf]) -> Vec<PathBuf> {
     let extensions: Vec<String> = match std::env::var("PATHEXT") {
         Ok(list) if !list.is_empty() => list.split(';').map(str::to_lowercase).collect(),
         _ => vec![String::new()],
     };
-    std::env::var_os("PATH")
-        .map(|path| {
-            std::env::split_paths(&path).any(|dir| {
-                extensions
-                    .iter()
-                    .any(|ext| dir.join(format!("{exe}{ext}")).is_file())
-            })
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    dirs.iter()
+        .cloned()
+        .chain(std::env::split_paths(&path))
+        .filter_map(|dir| {
+            extensions
+                .iter()
+                .map(|ext| dir.join(format!("{exe}{ext}")))
+                .find(|candidate| candidate.is_file())
         })
-        .unwrap_or(false)
+        .collect()
 }
 
 /// The filesystem, for the one tree the target and guard loaders read.

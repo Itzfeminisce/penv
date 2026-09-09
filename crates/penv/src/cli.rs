@@ -58,6 +58,20 @@ pub enum Command {
         /// Overwrite an existing .env.schema
         #[arg(long)]
         force: bool,
+        /// Guard exactly these harnesses instead of the installed ones
+        #[arg(
+            long,
+            value_name = "NAMES",
+            value_delimiter = ',',
+            conflicts_with = "no_guards"
+        )]
+        guards: Option<Vec<String>>,
+        /// Write no harness rules at all
+        #[arg(long)]
+        no_guards: bool,
+        /// Write the generated typed file here, relative to the repository root
+        #[arg(long, value_name = "PATH")]
+        output: Option<std::path::PathBuf>,
     },
 
     /// Validate, then run a command with the values in its environment only
@@ -136,7 +150,7 @@ pub enum Command {
     Gen {
         /// The target name, such as ts or py; omit it to list the targets
         target: Option<String>,
-        /// Write somewhere other than the path the target names
+        /// Write here instead, relative to the repository root
         #[arg(long, value_name = "PATH")]
         out: Option<std::path::PathBuf>,
         /// Compare with what is on disk instead of writing

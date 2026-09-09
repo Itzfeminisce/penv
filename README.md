@@ -19,7 +19,7 @@ penv reads the `.env` you already have, writes a small committed schema next to 
 
 ## The first minute
 
-No account, no prompts.
+No account, no sign-in.
 
 ```bash
 curl -fsSL https://penv.cloud/install | sh    # one binary, no Node
@@ -46,7 +46,7 @@ PORT=3000
 DEBUG=true
 ```
 
-Every key is sensitive and required unless a bundler prefix like `NEXT_PUBLIC_` or a dull value like `3000` says otherwise. No value that could be a secret is ever copied into the schema. Edit the file if a guess is wrong; the decorators follow the [@env-spec](https://varlock.dev) vocabulary, so a varlock user reads it on sight.
+Every key is sensitive and required unless a bundler prefix like `NEXT_PUBLIC_` or a dull value like `3000` or `us-east-1` says otherwise, and a key named for what it holds, such as `STRIPE_SECRET_KEY` or `NEXT_PUBLIC_SUPABASE_ANON_KEY`, keeps its value out whatever the value looks like and whatever prefix it carries. No value that could be a secret is ever copied into the schema. Edit the file if a guess is wrong; the decorators follow the [@env-spec](https://varlock.dev) vocabulary, so a varlock user reads it on sight.
 
 ## With a team
 
@@ -60,11 +60,21 @@ From then on the cloud is the store and `.env` is a view you can regenerate with
 ## Typed access
 
 ```bash
-penv gen ts        # src/env.ts, a typed cast over process.env, no runtime
-penv gen py        # penv_env.py, pydantic with SecretStr for sensitive keys
+penv gen ts        # a typed cast over your runtime's env plus a Standard Schema validator
+penv gen py        # penv_env.py on the standard library, or pydantic when your project uses it
 ```
 
-A language target is a folder holding a `target.toml` and a template. Drop one into `.penv/targets/go/` and `penv gen go` works. The binary knows no language by name.
+penv asks where the file goes, once, and never guesses:
+
+```text
+where should env.ts go? [apps/web/src/env.ts] (Enter, number, path, none):
+```
+
+The suggestions come from the directories that hold a `package.json`, a `pyproject.toml` and so on, shallowest first, with the repository root last so Enter in a monorepo lands on a package. Enter takes the first, a number takes another, a path is your own, and `none` skips. The answer is remembered in `.penv/targets/<name>/target.toml`, which you commit, so nobody is asked twice. `--out <PATH>` answers it up front, and is what a script or CI passes: without a flag or a remembered answer, a non-interactive run writes nothing and says which flag to pass.
+
+`ts` reads through one accessor, `process.env` by default and `import.meta.env` or `Deno.env.get` when a `vite.config.*` or a `deno.json` sits beside it. penv never edits your `tsconfig.json`: it prints the import line to paste, following `extends` and using an alias from your `paths` map when one already reaches the file.
+
+A language target is a folder holding a `target.toml` and a template. Drop one into `.penv/targets/go/` and `penv gen go` works; a folder holding only a `target.toml` inherits the rest. The binary knows no language by name.
 
 ## Coding agents
 
@@ -82,11 +92,11 @@ The claim penv makes, printed by `penv guard --check`, is only what is true: it 
 | Command | Does |
 |---|---|
 | `penv` | State and the one next command |
-| `init` | `.env` to `.env.schema`, never prompts |
+| `init [--guards NAMES\|--no-guards] [--output PATH]` | `.env` to `.env.schema`, picks the harnesses to guard, generates the typed files |
 | `run -- cmd` | Validate, inject, mask |
 | `check [KEY]` | Schema, values, drift, guard coverage |
 | `ls` | Names and types, values masked |
-| `gen <target>` | Typed file for a language |
+| `gen <target> [--out PATH] [--check]` | Typed file for a language |
 | `guard` | Harness configs from the schema |
 | `push` / `pull` | Values to and from the cloud |
 | `set` / `unset` | Write a value, never echoed |

@@ -108,9 +108,9 @@ fn failed(render: Render, error: &CliError) -> String {
 #[test]
 fn an_error_is_one_json_object_or_one_line() {
     let error = CliError::new(
-        "no_dotenv",
-        "there is no .env in this directory.",
-        "Write a .env with your keys, then run penv init.",
+        "no_schema",
+        "no .env.schema here or in any directory above.",
+        "Run penv init to write one from your .env.",
     );
 
     let json = failed(
@@ -124,9 +124,9 @@ fn an_error_is_one_json_object_or_one_line() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap(),
         json!({
-            "error": "no_dotenv",
-            "message": "there is no .env in this directory.",
-            "fix": "Write a .env with your keys, then run penv init.",
+            "error": "no_schema",
+            "message": "no .env.schema here or in any directory above.",
+            "fix": "Run penv init to write one from your .env.",
         })
     );
 
@@ -138,7 +138,7 @@ fn an_error_is_one_json_object_or_one_line() {
         &error,
     );
     assert_eq!(text.lines().count(), 1);
-    assert!(text.contains("there is no .env"));
+    assert!(text.contains("no .env.schema"));
     assert!(!text.contains('\u{1b}'), "colour was not asked for");
 
     let coloured = failed(

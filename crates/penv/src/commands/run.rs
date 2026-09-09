@@ -40,7 +40,16 @@ pub fn run(
 
     // The design has init fire when run meets a .env with no schema for it.
     if find_schema(cwd).is_none() && cwd.join(ENV_FILE).is_file() {
-        let inferred = super::init::run(out, cwd, false)?;
+        // Mid-run is no place for a picker, so this takes the installed set.
+        let inferred = super::init::run(
+            out,
+            cwd,
+            false,
+            &super::init::Guards::Installed,
+            None,
+            process_env,
+            agent_flag,
+        )?;
         let _ = writeln!(
             stderr,
             "penv: there was no {SCHEMA_FILE}, so penv init wrote one from {ENV_FILE}."

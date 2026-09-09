@@ -1,17 +1,38 @@
 name = "py"
 output = "penv_env.py"
-detect = ["pyproject.toml", "requirements.txt"]
+detect = ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"]
+import = "from {module} import env"
+
+[options]
+# Pydantic types for urls and secrets; off leaves the output on the standard
+# library alone.
+pydantic = false
+
+[[suggest]]
+option = "pydantic"
+prompt = "use pydantic types?"
+
+[[suggest.rule]]
+value = true
+files = ["pyproject.toml"]
+contains = "pydantic"
+
+# A src layout keeps the package under src/<name>/, and so does what penv writes.
+[[layout]]
+when = "src/*/__init__.py"
+output = "src/*/penv_env.py"
+root = "src"
 
 [types]
 string = "str"
 number = "float"
 integer = "int"
 boolean = "bool"
-url = "HttpUrl"
+url = "str"
 email = "str"
 port = "int"
 enum = "'Literal[' ~ (values | map('quote') | join(', ')) ~ ']'"
 
 [check]
-command = ["python3", "-m", "py_compile", "{file}"]
-probe = ["python3", "--version"]
+command = ["python3|python|py", "-m", "py_compile", "{file}"]
+probe = ["python3|python|py", "--version"]

@@ -117,7 +117,11 @@ pub fn read(input: &str) -> Dotenv {
             );
         }
 
-        let value = read_value(value_part.trim_start(), &lines, &mut i, line_no, &mut out);
+        let first = value_part.trim_start();
+        // Where the value starts on this line, so an escape can be pointed at
+        // without printing what it sits in.
+        let column = line.trim_end().len() - first.len() + 1;
+        let value = read_value(first, &lines, &mut i, line_no, column, &mut out);
         if value.contains('$') {
             out.warn(
                 line_no,
@@ -160,6 +164,7 @@ fn read_value(
     lines: &[&str],
     i: &mut usize,
     line_no: u32,
+    column: usize,
     out: &mut Dotenv,
 ) -> String {
     let quote = first.chars().next().filter(|c| *c == '"' || *c == '\'');
@@ -168,13 +173,14 @@ fn read_value(
         return raw.trim_end().to_string();
     };
 
+    let body_at = column + quote.len_utf8();
     let mut body = first[quote.len_utf8()..].to_string();
     let mut spanned = false;
     loop {
         if let Some(end) = find_close(&body, quote) {
             let value = &body[..end];
             return if quote == '"' {
-                unescape(value, line_no, out)
+                unescape(value, line_no, body_at, out)
             } else {
                 value.to_string()
             };
@@ -186,7 +192,7 @@ fn read_value(
                 "a quoted value is never closed; the rest of the file was read as its value",
             );
             return if quote == '"' {
-                unescape(&body, line_no, out)
+                unescape(&body, line_no, body_at, out)
             } else {
                 body
             };
@@ -238,29 +244,67 @@ fn strip_inline_comment<'a>(value: &'a str, line_no: u32, out: &mut Dotenv) -> &
     value
 }
 
-fn unescape(value: &str, line_no: u32, out: &mut Dotenv) -> String {
+/// Only `\n` is the portable escape. Another still decodes, so a file some other
+/// tool wrote reads, and is named by line and column, never by character.
+fn unescape(value: &str, line_no: u32, at: usize, out: &mut Dotenv) -> String {
     if !value.contains('\\') {
         return value.to_string();
     }
-    out.warn(
-        line_no,
-        "escape_sequences",
-        "escapes in a value are not part of the safe subset",
-    );
     let mut result = String::with_capacity(value.len());
-    let mut chars = value.chars();
-    while let Some(c) = chars.next() {
+    let mut chars = value.char_indices();
+    let mut warned = false;
+    let mut warn = |out: &mut Dotenv, index: usize| {
+        if !warned {
+            warned = true;
+            let (line, column) = position(value, index, line_no, at);
+            out.warn(
+                line,
+                "escape_sequences",
+                format!("the escape at column {column} is outside \\n"),
+            );
+        }
+    };
+    while let Some((index, c)) = chars.next() {
         if c != '\\' {
             result.push(c);
             continue;
         }
         match chars.next() {
-            Some('n') => result.push('\n'),
-            Some('r') => result.push('\r'),
-            Some('t') => result.push('\t'),
-            Some(other) => result.push(other),
-            None => result.push('\\'),
+            Some((_, 'n')) => result.push('\n'),
+            Some((_, 'r')) => {
+                warn(out, index);
+                result.push('\r');
+            }
+            Some((_, 't')) => {
+                warn(out, index);
+                result.push('\t');
+            }
+            Some((_, quoted @ ('"' | '\\'))) => {
+                warn(out, index);
+                result.push(quoted);
+            }
+            Some((_, other)) => {
+                warn(out, index);
+                result.push(other);
+            }
+            None => {
+                warn(out, index);
+                result.push('\\');
+            }
         }
     }
     result
+}
+
+/// Where an escape sits: the line it is on and its column there, so a value that
+/// spans lines is not reported all at its first one.
+fn position(body: &str, index: usize, line_no: u32, at: usize) -> (u32, usize) {
+    let before = &body[..index];
+    match before.rfind('\n') {
+        Some(newline) => (
+            line_no + before.matches('\n').count() as u32,
+            index - newline,
+        ),
+        None => (line_no, at + index),
+    }
 }

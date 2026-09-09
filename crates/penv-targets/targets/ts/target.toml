@@ -1,10 +1,32 @@
 name = "ts"
 output = "src/env.ts"
 detect = ["package.json", "tsconfig.json"]
+import = "import { env } from \"{specifier}\""
+paths_from = "tsconfig.json"
 
 [options]
 # Property names in the exported object: the environment key, or its camel form.
 key_case = "upper"
+# Where the values are read from at run time.
+runtime = "node"
+
+[[suggest]]
+option = "runtime"
+prompt = "which runtime reads the env?"
+
+[[suggest.rule]]
+value = "vite"
+files = [
+  "vite.config.js",
+  "vite.config.mjs",
+  "vite.config.cjs",
+  "vite.config.ts",
+  "vite.config.mts",
+]
+
+[[suggest.rule]]
+value = "deno"
+files = ["deno.json", "deno.jsonc"]
 
 [types]
 string = "string"
@@ -19,6 +41,12 @@ enum = "values | map('quote') | join(' | ')"
 [check]
 command = ["tsc", "--noEmit", "--strict", "--skipLibCheck", "--target", "es2020", "--module", "esnext", "--moduleResolution", "bundler", "{file}", "penv-globals.d.ts"]
 probe = ["tsc", "--version"]
+bin = ["node_modules/.bin"]
 
 [check.files]
-"penv-globals.d.ts" = "declare const process: { env: Record<string, string | undefined> };\n"
+"penv-globals.d.ts" = """
+declare const process: { env: Record<string, string | undefined> };
+declare const Deno: { env: { get(key: string): string | undefined } };
+declare const URL: { new (url: string): unknown };
+interface ImportMeta { readonly env: Record<string, string | undefined> }
+"""

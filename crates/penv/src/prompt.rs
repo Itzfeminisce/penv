@@ -24,6 +24,20 @@ pub fn read_value(prompt: &str) -> Result<String, CliError> {
     read_typed(prompt)
 }
 
+/// One echoed line, for a choice that is not a value. The prompt goes to stderr,
+/// so stdout still carries only the report.
+pub fn read_line(prompt: &str) -> Result<String, CliError> {
+    let mut stderr = std::io::stderr();
+    let _ = write!(stderr, "{prompt}");
+    let _ = stderr.flush();
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(unreadable)?;
+    Ok(trimmed(&line))
+}
+
 /// A value typed at a terminal. Without the echo bit off it would be typed onto
 /// the screen, so there is no reading it here at all.
 fn read_typed(prompt: &str) -> Result<String, CliError> {

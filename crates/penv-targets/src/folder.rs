@@ -65,12 +65,14 @@ impl BuiltIn {
     }
 }
 
-/// One folder that was found, with its files still unread.
+/// One folder that was found, with its files still unread. A file the folder
+/// does not hold is read from the next place in the lookup order, so a folder
+/// that overrides one file inherits the rest.
 #[derive(Debug)]
 pub struct Found<'a> {
     pub source: Source,
     pub dir: String,
-    read: Reader<'a>,
+    readers: Vec<(Source, Reader<'a>)>,
 }
 
 type ReadFile<'a> = Box<dyn Fn(&str) -> Option<String> + 'a>;
@@ -85,11 +87,28 @@ impl std::fmt::Debug for Reader<'_> {
 
 impl Found<'_> {
     pub fn file(&self, name: &str) -> Option<String> {
-        (self.read.0)(name)
+        self.file_from(name).map(|(_, body)| body)
+    }
+
+    /// The file and the place it came from, which is not always the folder that
+    /// won the lookup.
+    pub fn file_from(&self, name: &str) -> Option<(Source, String)> {
+        self.readers
+            .iter()
+            .find_map(|(source, read)| (read.0)(name).map(|body| (*source, body)))
+    }
+
+    /// Every copy of one file down the lookup order, the winning folder first.
+    pub fn files(&self, name: &str) -> Vec<(Source, String)> {
+        self.readers
+            .iter()
+            .filter_map(|(source, read)| (read.0)(name).map(|body| (*source, body)))
+            .collect()
     }
 }
 
-fn dirs(roots: &Roots, kind: &str, name: &str) -> Vec<(Source, String)> {
+/// The folders on disk a lookup reads, in order.
+pub fn places(roots: &Roots, kind: &str, name: &str) -> Vec<(Source, String)> {
     let mut out = vec![(Source::Repo, format!("{}/.penv/{kind}/{name}", roots.repo))];
     if let Some(home) = &roots.home {
         out.push((Source::User, format!("{home}/.penv/{kind}/{name}")));
@@ -98,7 +117,8 @@ fn dirs(roots: &Roots, kind: &str, name: &str) -> Vec<(Source, String)> {
 }
 
 /// Repo folder, then home folder, then built in. The first one holding `entry`
-/// wins; the error is the list of places that were looked in.
+/// wins, and every place after it stays readable for the files it does not hold;
+/// the error is the list of places that were looked in.
 pub fn find<'a>(
     tree: &'a dyn Tree,
     roots: &Roots,
@@ -107,29 +127,41 @@ pub fn find<'a>(
     built_in: &'static [BuiltIn],
     name: &str,
 ) -> Result<Found<'a>, Vec<String>> {
-    let mut looked = Vec::new();
-    for (source, dir) in dirs(roots, kind, name) {
-        looked.push(dir.clone());
-        if tree.read(&format!("{dir}/{entry}")).is_none() {
-            continue;
-        }
-        let prefix = dir.clone();
-        return Ok(Found {
-            source,
-            dir,
-            read: Reader(Box::new(move |file| tree.read(&format!("{prefix}/{file}")))),
-        });
-    }
+    let places = places(roots, kind, name);
+    let compiled = built_in.iter().find(|b| b.name == name);
+    let won = places
+        .iter()
+        .position(|(_, dir)| tree.read(&format!("{dir}/{entry}")).is_some());
 
-    looked.push("built in".into());
-    match built_in.iter().find(|b| b.name == name) {
-        Some(b) => Ok(Found {
-            source: Source::BuiltIn,
-            dir: "built in".into(),
-            read: Reader(Box::new(move |file| b.file(file).map(str::to_string))),
-        }),
-        None => Err(looked),
+    let (source, dir, from) = match (won, compiled) {
+        (Some(index), _) => (places[index].0, places[index].1.clone(), index),
+        (None, Some(_)) => (Source::BuiltIn, "built in".to_string(), places.len()),
+        (None, None) => {
+            let mut looked: Vec<String> = places.into_iter().map(|(_, dir)| dir).collect();
+            looked.push("built in".into());
+            return Err(looked);
+        }
+    };
+
+    let mut readers: Vec<(Source, Reader<'a>)> = places
+        .into_iter()
+        .skip(from)
+        .map(|(source, dir)| {
+            let reader: ReadFile<'a> = Box::new(move |file| tree.read(&format!("{dir}/{file}")));
+            (source, Reader(reader))
+        })
+        .collect();
+    if let Some(b) = compiled {
+        readers.push((
+            Source::BuiltIn,
+            Reader(Box::new(move |file| b.file(file).map(str::to_string))),
+        ));
     }
+    Ok(Found {
+        source,
+        dir,
+        readers,
+    })
 }
 
 /// The built-in names in their own order, then whatever the two `.penv` folders
@@ -239,6 +271,17 @@ mod tests {
         let found = find(&tree, &roots(), "targets", "target.toml", BUILT_IN, "ts").unwrap();
         assert_eq!(found.source, Source::Repo);
         assert_eq!(found.file("env.tmpl").as_deref(), Some("repo"));
+    }
+
+    #[test]
+    fn a_file_the_winning_folder_lacks_comes_from_the_next_place() {
+        let tree = Fake::default().with("/repo/.penv/targets/ts/target.toml", "repo config");
+        let found = find(&tree, &roots(), "targets", "target.toml", BUILT_IN, "ts").unwrap();
+        assert_eq!(found.source, Source::Repo);
+        assert_eq!(
+            found.file_from("env.tmpl"),
+            Some((Source::BuiltIn, "built in".to_string()))
+        );
     }
 
     #[test]

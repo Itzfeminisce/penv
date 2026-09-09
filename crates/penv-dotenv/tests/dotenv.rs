@@ -79,12 +79,6 @@ fn the_writer_refuses_what_the_subset_excludes() {
         })
     );
     assert_eq!(
-        write(&[("A_KEY", "one\ntwo")]),
-        Err(WriteError::MultiLine {
-            key: "A_KEY".into()
-        })
-    );
-    assert_eq!(
         write(&[("A_KEY", "one"), ("A_KEY", "two")]),
         Err(WriteError::DuplicateKey {
             key: "A_KEY".into()
@@ -96,12 +90,115 @@ fn the_writer_refuses_what_the_subset_excludes() {
             key: "a-key".into()
         })
     );
-    assert!(write(&[("A_KEY", "both ' and \"")]).is_err());
+    // A line break needs double quotes, and a backslash cannot be written inside
+    // them without an escape no dialect agrees on.
+    assert_eq!(
+        write(&[("A_KEY", "one\ntwo\\three")]),
+        Err(WriteError::Unquotable {
+            key: "A_KEY".into()
+        })
+    );
     assert_eq!(
         write(&[("A_KEY", r"a \ and a '")]),
         Err(WriteError::Unquotable {
             key: "A_KEY".into()
         })
+    );
+}
+
+#[test]
+fn every_shape_a_real_value_takes_round_trips() {
+    let pairs = [
+        (
+            "PEM_KEY",
+            "-----BEGIN PRIVATE KEY-----\nZmFrZWtleQ==\n-----END PRIVATE KEY-----\n",
+        ),
+        ("WINDOWS_PATH", r"C:\Users\example\.penv"),
+        ("TRAILING_SLASH", r"C:\Users\example\"),
+        ("REGEX", r"\d+\.\d+"),
+        ("QUOTED_HASH", "say \"hi\" #1"),
+        ("LEADING_NBSP", "\u{a0}indented"),
+        ("PLAIN", "one"),
+        ("EMPTY", ""),
+    ];
+    let text = write(&pairs).unwrap();
+    assert_eq!(
+        text.lines().count(),
+        pairs.len(),
+        "a value spilled onto its own line: {text:?}"
+    );
+    assert!(text.contains(r"\n-----END"), "{text}");
+
+    let env = read(&text);
+    assert!(env.warnings.is_empty(), "{:?}", env.warnings);
+    for (key, value) in pairs {
+        assert_eq!(env.get(key), Some(value), "wrote {text:?}");
+    }
+}
+
+#[test]
+fn an_escape_outside_the_subset_is_named_by_its_column_and_never_its_character() {
+    let env = read("A_KEY=\"a \\x b\"\n");
+    assert_eq!(env.get("A_KEY"), Some("a x b"));
+    let warning = env
+        .warnings
+        .iter()
+        .find(|w| w.code == "escape_sequences")
+        .expect("the unknown escape was not reported");
+    assert_eq!(warning.line, 1);
+    assert_eq!(warning.message, "the escape at column 10 is outside \\n");
+    assert_eq!(
+        env.warnings
+            .iter()
+            .filter(|w| w.code == "escape_sequences")
+            .count(),
+        1,
+        "one warning per value"
+    );
+
+    let subset = read("B_KEY=\"line\\none\"\n");
+    assert_eq!(subset.get("B_KEY"), Some("line\none"));
+    assert!(subset.warnings.is_empty(), "{:?}", subset.warnings);
+
+    // Node's util.parseEnv decodes \n and nothing else, so \r is a dialect too.
+    let carriage = read("C_KEY=\"line\\rone\"\n");
+    assert_eq!(carriage.get("C_KEY"), Some("line\rone"));
+    assert_eq!(codes(&carriage.warnings), ["escape_sequences"]);
+}
+
+#[test]
+fn an_escape_on_a_continuation_line_is_named_where_it_sits() {
+    let env = read("A_KEY=\"line one\n\\x line two\"\n");
+    assert_eq!(env.get("A_KEY"), Some("line one\nx line two"));
+    let warning = env
+        .warnings
+        .iter()
+        .find(|w| w.code == "escape_sequences")
+        .expect("the unknown escape was not reported");
+    assert_eq!(warning.line, 2, "the escape sits on the second line");
+    assert_eq!(warning.message, "the escape at column 1 is outside \\n");
+}
+
+#[test]
+fn a_crlf_value_is_written_and_read_back_as_the_lf_one_it_means() {
+    let pem = "-----BEGIN PRIVATE KEY-----\r\nZmFrZWtleQ==\r\n-----END PRIVATE KEY-----";
+    let text = write(&[("PEM_KEY", pem)]).unwrap();
+    assert!(!text.contains('\r'), "{text:?}");
+    assert!(text.contains(r"\nZmFrZWtleQ==\n"), "{text:?}");
+
+    let env = read(&text);
+    assert!(env.warnings.is_empty(), "{:?}", env.warnings);
+    assert_eq!(
+        env.get("PEM_KEY"),
+        Some("-----BEGIN PRIVATE KEY-----\nZmFrZWtleQ==\n-----END PRIVATE KEY-----")
+    );
+
+    assert_eq!(
+        write(&[("A_KEY", "one\rtwo")]),
+        Err(WriteError::Unquotable {
+            key: "A_KEY".into()
+        }),
+        "a bare carriage return has no portable spelling"
     );
 }
 
@@ -152,7 +249,7 @@ fn every_key_is_sensitive_unless_a_prefix_or_a_dull_value_says_otherwise() {
 ",
         "APP_NAME=demo
 ",
-        "NEXT_PUBLIC_API_KEY=pk_public_fake
+        "NEXT_PUBLIC_ANALYTICS_ID=pk_public_fake
 ",
     ));
     let schema = infer(&env);
@@ -165,17 +262,53 @@ fn every_key_is_sensitive_unless_a_prefix_or_a_dull_value_says_otherwise() {
     );
     assert!(!sensitive("APP_NAME"), "a lowercase word is not a secret");
     assert!(
-        !sensitive("NEXT_PUBLIC_API_KEY"),
+        !sensitive("NEXT_PUBLIC_ANALYTICS_ID"),
         "a bundler prefix ships the value to the browser anyway"
     );
     assert_eq!(
         schema
-            .get("NEXT_PUBLIC_API_KEY")
+            .get("NEXT_PUBLIC_ANALYTICS_ID")
             .unwrap()
             .sensitive_decorator,
         None,
         "the prefix rule needs no decorator"
     );
+}
+
+#[test]
+fn a_prefixed_key_named_for_a_credential_is_public_but_its_value_stays_out() {
+    let env = read(
+        "NEXT_PUBLIC_SUPABASE_ANON_KEY=eyfake
+",
+    );
+    let key = schema_key(&env, "NEXT_PUBLIC_SUPABASE_ANON_KEY");
+    assert!(!key.sensitive, "the prefix says the browser reads it");
+    assert_eq!(key.default, None, "the name says what it holds");
+    assert_eq!(key.sensitive_decorator, None);
+}
+
+#[test]
+fn the_credential_words_match_their_plurals_in_both_spellings() {
+    let env = read(concat!(
+        "SMTP_PASSES=hunter\n",
+        "MY_PASSWD=hunter\n",
+        "CRED=hunter\n",
+        "DB_PASS=hunter\n",
+        "TOKEN_TTL=300\n",
+        "PORT=3000\n",
+    ));
+    for vetoed in ["SMTP_PASSES", "MY_PASSWD", "CRED", "DB_PASS", "TOKEN_TTL"] {
+        let key = schema_key(&env, vetoed);
+        assert_eq!(key.default, None, "{vetoed} carried its value out");
+        assert!(key.sensitive, "{vetoed} is not sensitive");
+    }
+    let port = schema_key(&env, "PORT");
+    assert_eq!(port.default.as_deref(), Some("3000"));
+    assert!(!port.sensitive);
+}
+
+fn schema_key(env: &penv_dotenv::Dotenv, name: &str) -> penv_schema::Key {
+    infer(env).get(name).expect("the key").clone()
 }
 
 #[test]
@@ -304,6 +437,59 @@ fn only_a_dull_value_is_copied_into_the_committed_schema() {
     }
     assert!(rendered.contains("NEXT_PUBLIC_APP_URL=https://example.test/x?y=1"));
     assert_eq!(penv_schema::parse(&rendered).unwrap(), schema);
+}
+
+#[test]
+fn a_lowercase_slug_is_dull_enough_for_the_schema_and_a_token_is_not() {
+    let env = read(concat!(
+        "NODE_ENV=development\n",
+        "AWS_REGION=us-east-1\n",
+        "MODEL=gpt-4o\n",
+        "SERVICE_HOST=api.internal\n",
+        "API_TOKEN=a3f9c2d4e5b6\n",
+        "REQUEST_ID=7f3a91b2c4d5e6f708192a3b4c5d6e7f\n",
+        "TENANT_ID=acme-0123456789abcdef0123456789abcd\n",
+    ));
+    let schema = infer(&env);
+    let default = |name: &str| schema.get(name).unwrap().default.clone();
+    for copied in ["NODE_ENV", "AWS_REGION", "MODEL", "SERVICE_HOST"] {
+        assert!(default(copied).is_some(), "{copied} lost its value");
+    }
+    for kept in ["API_TOKEN", "REQUEST_ID", "TENANT_ID"] {
+        assert_eq!(default(kept), None, "{kept} reached the schema");
+    }
+}
+
+#[test]
+fn a_key_that_says_what_it_holds_keeps_its_value_whatever_the_value_looks_like() {
+    let env = read(concat!(
+        "STRIPE_SECRET_KEY=sk_test_0000\n",
+        "ADMIN_PASSWORD=hunter\n",
+        "SESSION_SALT=pepper\n",
+        "DB_PASS=letmein\n",
+        "API_KEYS=one\n",
+        "AUTH_HEADER=bearer\n",
+        "NEXT_PUBLIC_SUPABASE_ANON_KEY=eyfake\n",
+        "APP_MODE=maintenance\n",
+    ));
+    let schema = infer(&env);
+    let default = |name: &str| schema.get(name).unwrap().default.clone();
+    for kept in [
+        "STRIPE_SECRET_KEY",
+        "ADMIN_PASSWORD",
+        "SESSION_SALT",
+        "DB_PASS",
+        "API_KEYS",
+        "AUTH_HEADER",
+        "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+    ] {
+        assert_eq!(default(kept), None, "{kept} reached the schema");
+    }
+    assert!(
+        schema.get("DB_PASS").unwrap().sensitive,
+        "a copied value would have turned masking off"
+    );
+    assert_eq!(default("APP_MODE").as_deref(), Some("maintenance"));
 }
 
 #[test]

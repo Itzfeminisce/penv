@@ -3,7 +3,7 @@ pub mod cloud;
 mod r#gen;
 pub mod guard;
 pub mod hook;
-mod init;
+pub mod init;
 mod login;
 mod logout;
 mod ls;
@@ -28,7 +28,20 @@ use penv_schema::Schema;
 pub fn dispatch(cli: &Cli, out: &Output, cwd: &Path, env: &Env) -> Result<Report, CliError> {
     match &cli.command {
         None => state::run(out, cwd, env),
-        Some(Command::Init { force }) => init::run(out, cwd, *force),
+        Some(Command::Init {
+            force,
+            guards,
+            no_guards,
+            output,
+        }) => {
+            let choice = match (guards.as_deref().map(init::named), no_guards) {
+                (_, true) => init::Guards::None,
+                (Some(named), _) if named.is_empty() => init::Guards::None,
+                (Some(named), _) => init::Guards::Named(named),
+                _ => init::Guards::Ask,
+            };
+            init::run(out, cwd, *force, &choice, output.as_deref(), env, cli.agent)
+        }
         Some(Command::Run {
             env: environment,
             no_mask,
@@ -89,7 +102,15 @@ pub fn dispatch(cli: &Cli, out: &Output, cwd: &Path, env: &Env) -> Result<Report
             target,
             out: to,
             check,
-        }) => r#gen::run(out, cwd, target.as_deref(), to.as_deref(), *check),
+        }) => r#gen::run(
+            out,
+            cwd,
+            target.as_deref(),
+            to.as_deref(),
+            *check,
+            env,
+            cli.agent,
+        ),
         Some(Command::Guard {
             harness,
             all,
@@ -126,6 +147,15 @@ fn path_of(command: &Command) -> String {
         Command::Schema => "schema".into(),
         Command::Help { .. } => "help".into(),
     }
+}
+
+/// A person is watching and can answer: both ends are a terminal, the report is
+/// text, and nothing says an agent is driving.
+pub fn interactive(out: &Output, env: &Env, agent_flag: bool) -> bool {
+    use std::io::IsTerminal;
+
+    let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    tty && !out.is_json() && !agent_flag && !crate::agent::detect_here(env, tty).is_agent()
 }
 
 /// Load the nearest schema, reporting its diagnostics as one validation failure.

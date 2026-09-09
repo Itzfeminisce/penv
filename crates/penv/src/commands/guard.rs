@@ -28,15 +28,9 @@ pub fn run(
 ) -> Result<Report, CliError> {
     let (schema_path, schema) = load_schema(cwd)?;
     let dir = schema_path.parent().unwrap_or(cwd).to_path_buf();
-    let roots = Roots::new(show(&dir), home());
-    let probe = Installed {
-        repo: dir.clone(),
-        home: home().map(PathBuf::from),
-    };
-
-    let guards = penv_guards::available(&Disk, &roots);
+    let guards = known(&dir);
     for name in named {
-        if !guards.iter().any(|g| &g.name == name) {
+        if !guards.iter().any(|(g, _)| &g.name == name) {
             return Err(CliError::new(
                 "unknown_harness",
                 format!("penv has no guard for {name}."),
@@ -51,8 +45,8 @@ pub fn run(
     let mut blocks: Vec<Value> = Vec::new();
     let mut failed = false;
 
-    for guard in &guards {
-        let installed = penv_guards::is_installed(guard, &probe);
+    for (guard, installed) in &guards {
+        let installed = *installed;
         // The harnesses that are here, unless the run named others or asked for
         // all of them; a laptop without a harness is not a failing one.
         let selected = if !named.is_empty() {
@@ -139,17 +133,28 @@ pub fn run(
     })
 }
 
-/// Every installed harness, written. `init` calls this; a harness whose config
-/// cannot be merged is left alone rather than failing the import.
-pub fn auto(dir: &Path, schema: &Value) -> Vec<PathBuf> {
+/// Every harness penv knows here, and whether this machine has it.
+pub fn known(dir: &Path) -> Vec<(Guard, bool)> {
     let roots = Roots::new(show(dir), home());
     let probe = Installed {
         repo: dir.to_path_buf(),
         home: home().map(PathBuf::from),
     };
+    penv_guards::available(&Disk, &roots)
+        .into_iter()
+        .map(|guard| {
+            let installed = penv_guards::is_installed(&guard, &probe);
+            (guard, installed)
+        })
+        .collect()
+}
+
+/// The harnesses named, written. `init` calls this; a harness whose config
+/// cannot be merged is left alone rather than failing the import.
+pub fn write_selected(dir: &Path, schema: &Value, names: &[String]) -> Vec<PathBuf> {
     let mut written = Vec::new();
-    for guard in penv_guards::available(&Disk, &roots) {
-        if !penv_guards::is_installed(&guard, &probe) {
+    for (guard, _) in known(dir) {
+        if !names.contains(&guard.name) {
             continue;
         }
         for entry in guard.project_writes() {
@@ -244,6 +249,6 @@ impl penv_guards::Probe for Installed {
     }
 
     fn on_path(&self, exe: &str) -> bool {
-        on_path(exe)
+        !on_path(exe, &[]).is_empty()
     }
 }

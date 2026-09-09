@@ -80,11 +80,59 @@ fn the_ts_target_renames_its_properties_when_key_case_is_camel() {
     let schema = penv_schema::parse(FIXTURE).expect("the fixture parses");
     let out = render(&target, &schema.to_json(), VERSION).expect("the fixture renders");
     assert!(out.contains(
-        "  nextPublicAppUrl: (process.env.NEXT_PUBLIC_APP_URL ?? \"http://localhost:3000\") as string,"
+        "  nextPublicAppUrl: (read(\"NEXT_PUBLIC_APP_URL\") ?? \"http://localhost:3000\") as string,"
     ));
-    assert!(out.contains("seen[\"databaseUrl\"]"));
-    assert!(out.contains("path: [\"databaseUrl\"]"));
+    assert!(
+        out.contains("seen[\"DATABASE_URL\"]"),
+        "the schema reads the environment, whatever the properties are called"
+    );
+    assert!(out.contains("path: [\"DATABASE_URL\"]"));
     assert!(out.contains("message: \"DATABASE_URL is required\""));
+}
+
+/// `runtime` is the folder's own option too, and the accessor is the only line
+/// that changes with it.
+#[test]
+fn the_ts_target_reads_through_the_runtime_the_options_name() {
+    let reads = |runtime: &str| {
+        let mut target = built_in("ts");
+        target
+            .options
+            .insert("runtime".into(), toml::Value::String(runtime.into()));
+        let schema = penv_schema::parse(FIXTURE).expect("the fixture parses");
+        render(&target, &schema.to_json(), VERSION).expect("the fixture renders")
+    };
+    assert!(reads("vite").contains("=> import.meta.env[key];"));
+    assert!(reads("deno").contains("=> Deno.env.get(key);"));
+    assert!(reads("node").contains("=> process.env[key];"));
+    for runtime in ["vite", "deno"] {
+        assert!(
+            !reads(runtime).contains("process.env"),
+            "{runtime} still read process.env"
+        );
+    }
+}
+
+/// Stdlib only unless the folder asks for pydantic, so an import nobody has
+/// never lands in a generated file.
+#[test]
+fn the_py_target_takes_pydantic_types_only_when_its_options_ask_for_them() {
+    let mut target = built_in("py");
+    target
+        .options
+        .insert("pydantic".into(), toml::Value::Boolean(true));
+    let schema = penv_schema::parse(FIXTURE).expect("the fixture parses");
+    let out = render(&target, &schema.to_json(), VERSION).expect("the fixture renders");
+    assert!(out.contains("from pydantic import HttpUrl, SecretStr"));
+    assert!(out.contains("self.STRIPE_SECRET_KEY: SecretStr = SecretStr("));
+    assert!(
+        !PY.contains("pydantic"),
+        "the default is the standard library"
+    );
+    assert!(
+        PY.contains("self.STRIPE_SECRET_KEY: str = _require("),
+        "{PY}"
+    );
 }
 
 #[test]

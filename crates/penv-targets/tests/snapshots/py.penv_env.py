@@ -5,8 +5,6 @@ from __future__ import annotations
 import os
 from typing import Any, Callable, Literal
 
-from pydantic import HttpUrl, SecretStr
-
 
 def _require(name: str) -> str:
     value = os.environ.get(name)
@@ -29,10 +27,10 @@ def _flag(raw: str) -> bool:
 class Env:
     def __init__(self) -> None:
         # Where the service keeps its own rows.
-        self.DATABASE_URL: SecretStr = SecretStr(_require("DATABASE_URL"))
-        self.STRIPE_SECRET_KEY: SecretStr = SecretStr(_require("STRIPE_SECRET_KEY"))
+        self.DATABASE_URL: str = _require("DATABASE_URL")
+        self.STRIPE_SECRET_KEY: str = _require("STRIPE_SECRET_KEY")
         # Where the browser is sent back to after a redirect.
-        self.NEXT_PUBLIC_APP_URL: HttpUrl | None = _maybe(HttpUrl, "NEXT_PUBLIC_APP_URL", "http://localhost:3000")
+        self.NEXT_PUBLIC_APP_URL: str | None = _maybe(str, "NEXT_PUBLIC_APP_URL", "http://localhost:3000")
         self.PORT: int | None = _maybe(int, "PORT", "3000")
         self.NODE_ENV: Literal["development", "staging", "production"] | None = _maybe(str, "NODE_ENV", "development")
         # The tier this deployment serves.
@@ -44,7 +42,7 @@ class Env:
         self.DEBUG_TRACING: bool = _flag(_require("DEBUG_TRACING"))
         # Where failures are mailed.
         self.ALERTS_EMAIL: str | None = _maybe(str, "ALERTS_EMAIL", "ops@example.test")
-        self.SUPPORT_NOTE: SecretStr | None = _maybe(SecretStr, "SUPPORT_NOTE", None)
+        self.SUPPORT_NOTE: str | None = _maybe(str, "SUPPORT_NOTE", None)
 
 
 env = Env()

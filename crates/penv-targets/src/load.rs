@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::folder::{self, BuiltIn, Roots, Tree};
+use crate::folder::{self, BuiltIn, Roots, Source, Tree};
 use crate::target::{Target, parse};
 
 macro_rules! built_in {
@@ -24,9 +24,10 @@ macro_rules! built_in {
 /// user target uses.
 pub const BUILT_IN: &[BuiltIn] = &[built_in!("ts"), built_in!("py")];
 
-/// Repo folder, then home folder, then built in. The first found wins and says
-/// where it came from.
+/// Repo folder, then home folder, then built in. A file the winning folder does
+/// not hold comes from the next place, so an override inherits the rest.
 pub fn load(tree: &dyn Tree, roots: &Roots, name: &str) -> Result<Target, Error> {
+    lone_template(tree, roots, name)?;
     let found =
         folder::find(tree, roots, "targets", "target.toml", BUILT_IN, name).map_err(|looked| {
             Error::NotFound {
@@ -38,32 +39,67 @@ pub fn load(tree: &dyn Tree, roots: &Roots, name: &str) -> Result<Target, Error>
         dir: found.dir.clone(),
         message: message.to_string(),
     };
-    let config = found
-        .file("target.toml")
-        .ok_or_else(|| broken("no target.toml"))?;
+    // Key by key inside a table too, so an override naming one `[options]` knob
+    // keeps the other knobs and the [types] map it inherits.
+    let mut config = toml::Table::new();
+    let mut output_source = Source::BuiltIn;
+    for (source, text) in found.files("target.toml").iter().rev() {
+        let table: toml::Table = toml::from_str(text).map_err(|e| broken(e.message()))?;
+        if table.contains_key("output") {
+            output_source = *source;
+        }
+        merge(&mut config, table);
+    }
     let template = found
         .file("env.tmpl")
         .ok_or_else(|| broken("there is a target.toml but no env.tmpl"))?;
-    parse(name, &config, &template, found.source, &found.dir)
+    parse(
+        name,
+        &config,
+        &template,
+        found.source,
+        output_source,
+        &found.dir,
+    )
 }
 
-/// Every target that can be loaded, built in ones plus whatever the two `.penv`
-/// folders add, each resolved through the same lookup order.
-pub fn available(tree: &dyn Tree, roots: &Roots) -> Vec<Target> {
+fn merge(into: &mut toml::Table, from: toml::Table) {
+    for (field, value) in from {
+        match (into.get_mut(&field), value) {
+            (Some(toml::Value::Table(held)), toml::Value::Table(table)) => merge(held, table),
+            (_, value) => {
+                into.insert(field, value);
+            }
+        }
+    }
+}
+
+/// A folder is a target because it holds a `target.toml`; a template on its own
+/// overrides nothing and is a typo worth naming.
+fn lone_template(tree: &dyn Tree, roots: &Roots, name: &str) -> Result<(), Error> {
+    for (_, dir) in folder::places(roots, "targets", name) {
+        if tree.exists(&format!("{dir}/env.tmpl")) && !tree.exists(&format!("{dir}/target.toml")) {
+            return Err(Error::Malformed {
+                dir,
+                message: "there is an env.tmpl but no target.toml".into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Every target name this repository has, each one loaded or the reason it
+/// could not be. A folder nobody can read is named rather than dropped.
+pub fn available(tree: &dyn Tree, roots: &Roots) -> Vec<Result<Target, Error>> {
     let mut names = folder::names(tree, roots, "targets", BUILT_IN);
     names.sort();
-    names
-        .iter()
-        .filter_map(|name| load(tree, roots, name).ok())
-        .collect()
+    names.iter().map(|name| load(tree, roots, name)).collect()
 }
 
-/// True when a file this target names is in the repository.
+/// True when at least one directory in the repository holds a file this target
+/// detects.
 pub fn detected(tree: &dyn Tree, roots: &Roots, target: &Target) -> bool {
-    target
-        .detect
-        .iter()
-        .any(|file| tree.exists(&format!("{}/{file}", roots.repo)))
+    !crate::detect::candidates(tree, roots, target).is_empty()
 }
 
 #[cfg(test)]
@@ -72,7 +108,7 @@ mod tests {
     use crate::folder::Source;
     use std::collections::BTreeMap;
 
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct Fake(BTreeMap<String, String>);
 
     impl Fake {
@@ -163,10 +199,45 @@ enum = "values | join('|')"
     }
 
     #[test]
-    fn a_target_toml_with_no_template_beside_it_is_a_broken_folder() {
-        let tree = Fake::default().with("/repo/.penv/targets/ts/target.toml", &custom("ts"));
+    fn a_repo_folder_of_only_a_target_toml_keeps_the_built_in_template() {
+        let tree = Fake::default().with(
+            "/repo/.penv/targets/ts/target.toml",
+            "name = \"ts\"\noutput = \"apps/web/src/env.ts\"\n",
+        );
+        let target = load(&tree, &roots(), "ts").unwrap();
+        assert_eq!(target.source, Source::Repo);
+        assert_eq!(target.output, "apps/web/src/env.ts");
+        assert!(target.template.contains("export const env"), "built in");
+        assert_eq!(target.types["port"], "number", "the built-in [types] too");
+    }
+
+    #[test]
+    fn a_partial_repo_folder_reads_the_home_folder_before_the_built_in_one() {
+        let tree = Fake::default()
+            .with(
+                "/repo/.penv/targets/ts/target.toml",
+                "name = \"ts\"\noutput = \"apps/web/src/env.ts\"\n",
+            )
+            .with("/home/.penv/targets/ts/target.toml", &custom("ts"))
+            .with("/home/.penv/targets/ts/env.tmpl", "home");
+        let target = load(&tree, &roots(), "ts").unwrap();
+        assert_eq!(target.source, Source::Repo);
+        assert_eq!(target.output, "apps/web/src/env.ts");
+        assert_eq!(target.template, "home");
+    }
+
+    #[test]
+    fn a_template_with_no_target_toml_beside_it_is_a_broken_folder() {
+        let tree = Fake::default().with("/repo/.penv/targets/ts/env.tmpl", "repo");
         let error = load(&tree, &roots(), "ts").unwrap_err();
-        assert!(error.to_string().contains("no env.tmpl"));
+        assert!(error.to_string().contains("no target.toml"), "{error}");
+    }
+
+    #[test]
+    fn a_target_toml_no_place_has_a_template_for_is_a_broken_folder() {
+        let tree = Fake::default().with("/repo/.penv/targets/go/target.toml", &custom("go"));
+        let error = load(&tree, &roots(), "go").unwrap_err();
+        assert!(error.to_string().contains("no env.tmpl"), "{error}");
     }
 
     #[test]
@@ -175,17 +246,67 @@ enum = "values | join('|')"
             .with("/repo/.penv/targets/go/target.toml", &custom("go"))
             .with("/repo/.penv/targets/go/env.tmpl", "x");
         let found = available(&tree, &roots());
-        let names: Vec<&str> = found.iter().map(|t| t.name.as_str()).collect();
+        let names: Vec<String> = found
+            .iter()
+            .map(|t| t.as_ref().unwrap().name.clone())
+            .collect();
         assert_eq!(names, ["go", "py", "ts"]);
     }
 
     #[test]
-    fn a_target_is_detected_by_its_own_files_in_the_repo() {
+    fn a_folder_nobody_can_read_is_listed_as_the_error_it_is() {
+        let tree = Fake::default().with("/repo/.penv/targets/go/target.toml", "name = \"go\"\n");
+        let broken = available(&tree, &roots())
+            .into_iter()
+            .find(Result::is_err)
+            .expect("the malformed folder was dropped instead of named")
+            .unwrap_err();
+        assert!(
+            broken.to_string().contains("/repo/.penv/targets/go"),
+            "{broken}"
+        );
+    }
+
+    #[test]
+    fn a_target_is_detected_where_any_file_it_names_sits() {
         let tree = Fake::default().with("/repo/package.json", "{}");
         let r = roots();
         let ts = load(&tree, &r, "ts").unwrap();
         let py = load(&tree, &r, "py").unwrap();
-        assert!(detected(&tree, &r, &ts));
+        assert!(detected(&tree, &r, &ts), "one detect file is enough");
         assert!(!detected(&tree, &r, &py));
+    }
+
+    #[test]
+    fn only_a_repo_folder_naming_output_decides_where_a_file_goes() {
+        let built_in = load(&Fake::default(), &roots(), "ts").unwrap();
+        assert_eq!(built_in.output_source, Source::BuiltIn);
+
+        let options_only = Fake::default().with(
+            "/repo/.penv/targets/ts/target.toml",
+            "name = \"ts\"\n[options]\nkey_case = \"camel\"\n",
+        );
+        let target = load(&options_only, &roots(), "ts").unwrap();
+        assert_eq!(target.source, Source::Repo);
+        assert_eq!(
+            target.output_source,
+            Source::BuiltIn,
+            "an override that says nothing about output decides nothing"
+        );
+        assert_eq!(target.options["key_case"].as_str(), Some("camel"));
+        assert_eq!(
+            target.options["runtime"].as_str(),
+            Some("node"),
+            "one knob overridden keeps the others"
+        );
+
+        let named = Fake::default().with(
+            "/repo/.penv/targets/ts/target.toml",
+            "name = \"ts\"\noutput = \"apps/web/src/env.ts\"\n",
+        );
+        assert_eq!(
+            load(&named, &roots(), "ts").unwrap().output_source,
+            Source::Repo
+        );
     }
 }

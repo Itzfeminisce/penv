@@ -10,12 +10,10 @@ pub enum WriteError {
     InvalidKey { key: String },
     #[error("{key} is written twice. Keep one value per key.")]
     DuplicateKey { key: String },
-    #[error("{key} spans more than one line. A .env value is a single line.")]
-    MultiLine { key: String },
     #[error("{key} contains a $. penv never expands values, so store the expanded value instead.")]
     Interpolation { key: String },
     #[error(
-        "{key} mixes quote characters with a backslash, so it cannot be written without escapes."
+        "{key} mixes quotes, backslashes and line breaks in a way no .env dialect reads back. Keep it in the cloud and read it with penv run."
     )]
     Unquotable { key: String },
 }
@@ -37,41 +35,42 @@ pub fn write(entries: &[(&str, &str)]) -> Result<String, WriteError> {
             });
         }
         seen.push(key);
-        if value.contains(['\n', '\r']) {
-            return Err(WriteError::MultiLine {
-                key: key.to_string(),
-            });
-        }
         if value.contains('$') {
             return Err(WriteError::Interpolation {
                 key: key.to_string(),
             });
         }
-        let _ = writeln!(out, "{key}={}", quote(key, value)?);
+        // A CRLF value is written as the LF one it means; only `\n` survives
+        // every reader.
+        let value = value.replace("\r\n", "\n");
+        let quoted = quote(&value).ok_or_else(|| WriteError::Unquotable {
+            key: key.to_string(),
+        })?;
+        let _ = writeln!(out, "{key}={quoted}");
     }
     Ok(out)
 }
 
-fn quote(key: &str, value: &str) -> Result<String, WriteError> {
-    let double = value.contains('"');
-    let single = value.contains('\'');
-    // Every parser in the research leaves a single-quoted value alone, so a
-    // backslash survives only in single quotes.
-    let backslash = value.contains('\\');
-    if single && (double || backslash) {
-        return Err(WriteError::Unquotable {
-            key: key.to_string(),
-        });
+/// Only `\n` inside double quotes is an escape every dialect reads back, so a
+/// value carrying a `"` or a `\` goes in single quotes, where none are.
+fn quote(value: &str) -> Option<String> {
+    // A lone carriage return has no portable spelling left once CRLF is gone.
+    if value.contains('\r') {
+        return None;
     }
-    if backslash {
-        return Ok(format!("'{value}'"));
+    let breaks = value.contains('\n');
+    let literal = value.contains(['"', '\\']);
+    if breaks {
+        if literal {
+            return None;
+        }
+        return Some(format!("\"{}\"", value.replace('\n', "\\n")));
     }
-    if !(value.contains([' ', '\t', '#']) || double || single) {
-        return Ok(value.to_string());
+    if literal {
+        return (!value.contains('\'')).then(|| format!("'{value}'"));
     }
-    if double {
-        Ok(format!("'{value}'"))
-    } else {
-        Ok(format!("\"{value}\""))
+    if value.contains('#') || value.contains('\'') || value.chars().any(char::is_whitespace) {
+        return Some(format!("\"{value}\""));
     }
+    Some(value.to_string())
 }
