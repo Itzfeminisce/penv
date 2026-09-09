@@ -52,6 +52,11 @@ pub enum CloudError {
     #[error("{url} answered something that is not the JSON this route promises: {reason}")]
     Unreadable { url: String, reason: String },
 
+    #[error(
+        "{url} answered more bytes than penv will hold, or not the file it asked for: {reason}"
+    )]
+    Body { url: String, reason: String },
+
     #[error("{0}")]
     Url(String),
 

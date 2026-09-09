@@ -86,18 +86,14 @@ fn the_manifest_carries_the_whole_command_table() {
 }
 
 #[test]
-fn distribution_is_the_only_thing_left_unimplemented() {
+fn every_command_in_the_tree_is_implemented() {
     let manifest = manifest();
     let waiting: Vec<&str> = commands(&manifest)
         .iter()
         .filter(|c| c["implemented"] == false)
         .map(|c| c["path"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        waiting,
-        ["upgrade", "completions"],
-        "phase 3 is distribution"
-    );
+    assert!(waiting.is_empty(), "still stubs: {waiting:?}");
 }
 
 #[test]

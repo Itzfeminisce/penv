@@ -269,8 +269,8 @@ impl Parser {
                 d.1,
                 "schema_too_new",
                 format!(
-                    "line {}: this build understands @schema={SCHEMA_VERSION}. Run penv upgrade.",
-                    d.0
+                    "line {}: this schema is version {} and this penv reads up to {SCHEMA_VERSION}; run penv upgrade",
+                    d.0, self.schema.schema_version
                 ),
             );
         }

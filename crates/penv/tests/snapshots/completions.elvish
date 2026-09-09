@@ -1,0 +1,176 @@
+# penv completions elvish
+use builtin;
+use str;
+
+set edit:completion:arg-completer[penv] = {|@words|
+    fn cand {|text desc|
+        edit:complex-candidate $text &display=$text' '$desc
+    }
+    var valued = [&'--format'=['json' 'text'] &'--guards'=[] &'--output'=[] &'--env'=[] &'--org'=[] &'--value'=[] &'--out'=[]]
+    var previous = ''
+    if (> (count $words) 1) { set previous = $words[-2] }
+    var command = 'penv'
+    var skip = $false
+    for word $words[1..-1] {
+        if $skip { set skip = $false; continue }
+        if (str:has-prefix $word '-') {
+            if (has-key $valued $word) { set skip = $true }
+            continue
+        }
+        set command = $command';'$word
+    }
+    if (has-key $valued $previous) {
+        for value $valued[$previous] { cand $value $value }
+    } else {
+        if (eq $command 'penv') {
+            cand 'init' 'Read .env, write .env.schema, and keep .env out of the repository'
+            cand 'run' 'Validate, then run a command with the values in its environment only'
+            cand 'push' 'Move local values to the cloud and delete .env'
+            cand 'pull' 'Write a plain .env from the cloud'
+            cand 'login' 'Sign in with a device code; the credential goes to the OS keychain'
+            cand 'logout' 'Remove the stored credential'
+            cand 'set' 'Write one value without echoing it'
+            cand 'unset' 'Remove one value'
+            cand 'ls' 'List keys, types and which ones have a value'
+            cand 'check' 'Report schema problems and missing values'
+            cand 'gen' 'Write the typed file for a language target'
+            cand 'guard' 'Write the harness rules that keep agents out of .env'
+            cand 'reveal' 'Print one value after console approval'
+            cand 'machine' 'Machine identities'
+            cand 'upgrade' 'Replace this binary from the latest GitHub release'
+            cand 'completions' 'Print the shell completion script'
+            cand 'hook' 'Run as a harness hook; a payload it cannot read is refused'
+            cand 'schema' 'Print the schema as JSON'
+            cand 'help' 'Print the command manifest'
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;init') {
+            cand '--force' 'Overwrite an existing .env.schema'
+            cand '--guards' 'Guard exactly these harnesses instead of the installed ones'
+            cand '--no-guards' 'Write no harness rules at all'
+            cand '--output' 'Write the generated typed file here, relative to the repository root'
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;run') {
+            cand '--env' 'The environment to read'
+            cand '--no-mask' 'Leave the child''s output unmasked'
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;push') {
+            cand '--env' 'The environment to write to'
+            cand '--org' 'The organisation that owns a project penv is about to create'
+            cand '--prune' 'Delete cloud keys the schema no longer lists'
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;pull') {
+            cand '--env' 'The environment to read'
+            cand '--i-am-human' 'Confirm a person, not an agent, asked for the file'
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;login') {
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;logout') {
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;set') {
+            cand '--env' 'The environment to write to'
+            cand '--value' 'Refused: a value passed here lands in the shell history'
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;unset') {
+            cand '--env' 'The environment to write to'
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;ls') {
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;check') {
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;gen') {
+            cand '--out' 'Write here instead, relative to the repository root'
+            cand '--check' 'Compare with what is on disk instead of writing'
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;guard') {
+            cand '--all' 'Write every harness penv knows, installed or not'
+            cand '--check' 'Report coverage instead of writing'
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;reveal') {
+            cand '--env' 'The environment to read'
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;machine') {
+            cand 'enroll' 'Bind a server keypair from a one-time secret'
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;machine;enroll') {
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;upgrade') {
+            cand '--check' 'Report what the release carries instead of replacing anything'
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;completions') {
+            cand 'bash' 'bash'
+            cand 'zsh' 'zsh'
+            cand 'fish' 'fish'
+            cand 'powershell' 'powershell'
+            cand 'elvish' 'elvish'
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;hook') {
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;schema') {
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+        if (eq $command 'penv;help') {
+            cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
+            cand '--format' 'Pick the output format: json or text'
+            cand '--agent' 'Treat this session as an agent: JSON out, values masked'
+        }
+    }
+}

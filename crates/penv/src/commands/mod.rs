@@ -14,6 +14,7 @@ mod reveal;
 mod run;
 mod set;
 mod state;
+mod upgrade;
 
 use std::path::Path;
 
@@ -117,35 +118,13 @@ pub fn dispatch(cli: &Cli, out: &Output, cwd: &Path, env: &Env) -> Result<Report
             check,
         }) => guard::run(out, cwd, *check, *all, harness),
         Some(Command::Hook { harness }) => hook::run(harness, cwd),
+        Some(Command::Upgrade { check }) => upgrade::run(out, *check),
+        Some(Command::Completions { shell }) => completions(
+            shell,
+            cli.json || cli.format == Some(crate::cli::Format::Json),
+        ),
         Some(Command::Schema) => schema(cwd),
         Some(Command::Help { command }) => help(command.as_deref()),
-        Some(other) => Err(CliError::not_in_this_build(&path_of(other))),
-    }
-}
-
-fn path_of(command: &Command) -> String {
-    match command {
-        Command::Run { .. } => "run".into(),
-        Command::Push { .. } => "push".into(),
-        Command::Pull { .. } => "pull".into(),
-        Command::Login => "login".into(),
-        Command::Logout => "logout".into(),
-        Command::Set { .. } => "set".into(),
-        Command::Unset { .. } => "unset".into(),
-        Command::Gen { .. } => "gen".into(),
-        Command::Guard { .. } => "guard".into(),
-        Command::Reveal { .. } => "reveal".into(),
-        Command::Machine { command } => match command {
-            MachineCommand::Enroll { .. } => "machine enroll".into(),
-        },
-        Command::Upgrade => "upgrade".into(),
-        Command::Completions { .. } => "completions".into(),
-        Command::Hook { .. } => "hook".into(),
-        Command::Init { .. } => "init".into(),
-        Command::Check { .. } => "check".into(),
-        Command::Ls => "ls".into(),
-        Command::Schema => "schema".into(),
-        Command::Help { .. } => "help".into(),
     }
 }
 
@@ -187,6 +166,24 @@ fn load_schema(cwd: &Path) -> Result<(std::path::PathBuf, Schema), CliError> {
             )
             .with_exit(crate::error::Exit::Validation)
         })
+}
+
+/// A shell reads the script off stdout, and the install line redirects it into a
+/// file, so nothing but an explicit --json turns it into an object.
+fn completions(shell: &str, json: bool) -> Result<Report, CliError> {
+    use std::io::Write;
+
+    let script = crate::completions::script(shell, &manifest())?;
+    if json {
+        return Ok(Report::new(
+            serde_json::json!({ "shell": shell, "script": script }),
+            script,
+        ));
+    }
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(script.as_bytes());
+    let _ = stdout.flush();
+    Ok(Report::silent())
 }
 
 fn schema(cwd: &Path) -> Result<Report, CliError> {

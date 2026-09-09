@@ -1,0 +1,223 @@
+# penv completions powershell
+using namespace System.Management.Automation
+using namespace System.Management.Automation.Language
+
+Register-ArgumentCompleter -Native -CommandName 'penv', 'penv.exe' -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+
+    $valued = @{
+        '--format' = @('json', 'text')
+        '--guards' = @()
+        '--output' = @()
+        '--env' = @()
+        '--org' = @()
+        '--value' = @()
+        '--out' = @()
+    }
+
+    $words = @($commandAst.CommandElements | Select-Object -Skip 1 | Where-Object { $_ -is [StringConstantExpressionAst] } | ForEach-Object { $_.Value })
+    $previous = ''
+    if ($words.Count -gt 0) {
+        if ($words[-1] -eq $wordToComplete) {
+            if ($words.Count -gt 1) { $previous = $words[-2] }
+        } else {
+            $previous = $words[-1]
+        }
+    }
+    if ($valued.ContainsKey($previous)) {
+        $valued[$previous] | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+            [CompletionResult]::new($_, $_, [CompletionResultType]::ParameterValue, $_)
+        }
+        return
+    }
+
+    $command = @(
+        'penv'
+        $skip = $false
+        foreach ($word in $words) {
+            if ($word -eq $wordToComplete) { break }
+            if ($skip) { $skip = $false; continue }
+            if ($word.StartsWith('-')) {
+                if ($valued.ContainsKey($word)) { $skip = $true }
+                continue
+            }
+            $word
+        }
+    ) -join ';'
+
+    $completions = @(switch ($command) {
+        'penv' {
+            [CompletionResult]::new('init', 'init', [CompletionResultType]::ParameterValue, 'Read .env, write .env.schema, and keep .env out of the repository')
+            [CompletionResult]::new('run', 'run', [CompletionResultType]::ParameterValue, 'Validate, then run a command with the values in its environment only')
+            [CompletionResult]::new('push', 'push', [CompletionResultType]::ParameterValue, 'Move local values to the cloud and delete .env')
+            [CompletionResult]::new('pull', 'pull', [CompletionResultType]::ParameterValue, 'Write a plain .env from the cloud')
+            [CompletionResult]::new('login', 'login', [CompletionResultType]::ParameterValue, 'Sign in with a device code; the credential goes to the OS keychain')
+            [CompletionResult]::new('logout', 'logout', [CompletionResultType]::ParameterValue, 'Remove the stored credential')
+            [CompletionResult]::new('set', 'set', [CompletionResultType]::ParameterValue, 'Write one value without echoing it')
+            [CompletionResult]::new('unset', 'unset', [CompletionResultType]::ParameterValue, 'Remove one value')
+            [CompletionResult]::new('ls', 'ls', [CompletionResultType]::ParameterValue, 'List keys, types and which ones have a value')
+            [CompletionResult]::new('check', 'check', [CompletionResultType]::ParameterValue, 'Report schema problems and missing values')
+            [CompletionResult]::new('gen', 'gen', [CompletionResultType]::ParameterValue, 'Write the typed file for a language target')
+            [CompletionResult]::new('guard', 'guard', [CompletionResultType]::ParameterValue, 'Write the harness rules that keep agents out of .env')
+            [CompletionResult]::new('reveal', 'reveal', [CompletionResultType]::ParameterValue, 'Print one value after console approval')
+            [CompletionResult]::new('machine', 'machine', [CompletionResultType]::ParameterValue, 'Machine identities')
+            [CompletionResult]::new('upgrade', 'upgrade', [CompletionResultType]::ParameterValue, 'Replace this binary from the latest GitHub release')
+            [CompletionResult]::new('completions', 'completions', [CompletionResultType]::ParameterValue, 'Print the shell completion script')
+            [CompletionResult]::new('hook', 'hook', [CompletionResultType]::ParameterValue, 'Run as a harness hook; a payload it cannot read is refused')
+            [CompletionResult]::new('schema', 'schema', [CompletionResultType]::ParameterValue, 'Print the schema as JSON')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print the command manifest')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;init' {
+            [CompletionResult]::new('--force', '--force', [CompletionResultType]::ParameterValue, 'Overwrite an existing .env.schema')
+            [CompletionResult]::new('--guards', '--guards', [CompletionResultType]::ParameterValue, 'Guard exactly these harnesses instead of the installed ones')
+            [CompletionResult]::new('--no-guards', '--no-guards', [CompletionResultType]::ParameterValue, 'Write no harness rules at all')
+            [CompletionResult]::new('--output', '--output', [CompletionResultType]::ParameterValue, 'Write the generated typed file here, relative to the repository root')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;run' {
+            [CompletionResult]::new('--env', '--env', [CompletionResultType]::ParameterValue, 'The environment to read')
+            [CompletionResult]::new('--no-mask', '--no-mask', [CompletionResultType]::ParameterValue, 'Leave the child''s output unmasked')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;push' {
+            [CompletionResult]::new('--env', '--env', [CompletionResultType]::ParameterValue, 'The environment to write to')
+            [CompletionResult]::new('--org', '--org', [CompletionResultType]::ParameterValue, 'The organisation that owns a project penv is about to create')
+            [CompletionResult]::new('--prune', '--prune', [CompletionResultType]::ParameterValue, 'Delete cloud keys the schema no longer lists')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;pull' {
+            [CompletionResult]::new('--env', '--env', [CompletionResultType]::ParameterValue, 'The environment to read')
+            [CompletionResult]::new('--i-am-human', '--i-am-human', [CompletionResultType]::ParameterValue, 'Confirm a person, not an agent, asked for the file')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;login' {
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;logout' {
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;set' {
+            [CompletionResult]::new('--env', '--env', [CompletionResultType]::ParameterValue, 'The environment to write to')
+            [CompletionResult]::new('--value', '--value', [CompletionResultType]::ParameterValue, 'Refused: a value passed here lands in the shell history')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;unset' {
+            [CompletionResult]::new('--env', '--env', [CompletionResultType]::ParameterValue, 'The environment to write to')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;ls' {
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;check' {
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;gen' {
+            [CompletionResult]::new('--out', '--out', [CompletionResultType]::ParameterValue, 'Write here instead, relative to the repository root')
+            [CompletionResult]::new('--check', '--check', [CompletionResultType]::ParameterValue, 'Compare with what is on disk instead of writing')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;guard' {
+            [CompletionResult]::new('--all', '--all', [CompletionResultType]::ParameterValue, 'Write every harness penv knows, installed or not')
+            [CompletionResult]::new('--check', '--check', [CompletionResultType]::ParameterValue, 'Report coverage instead of writing')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;reveal' {
+            [CompletionResult]::new('--env', '--env', [CompletionResultType]::ParameterValue, 'The environment to read')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;machine' {
+            [CompletionResult]::new('enroll', 'enroll', [CompletionResultType]::ParameterValue, 'Bind a server keypair from a one-time secret')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;machine;enroll' {
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;upgrade' {
+            [CompletionResult]::new('--check', '--check', [CompletionResultType]::ParameterValue, 'Report what the release carries instead of replacing anything')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;completions' {
+            [CompletionResult]::new('bash', 'bash', [CompletionResultType]::ParameterValue, 'bash')
+            [CompletionResult]::new('zsh', 'zsh', [CompletionResultType]::ParameterValue, 'zsh')
+            [CompletionResult]::new('fish', 'fish', [CompletionResultType]::ParameterValue, 'fish')
+            [CompletionResult]::new('powershell', 'powershell', [CompletionResultType]::ParameterValue, 'powershell')
+            [CompletionResult]::new('elvish', 'elvish', [CompletionResultType]::ParameterValue, 'elvish')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;hook' {
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;schema' {
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+        'penv;help' {
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')
+            break
+        }
+    })
+
+    $completions | Where-Object { $_.CompletionText -like "$wordToComplete*" }
+}

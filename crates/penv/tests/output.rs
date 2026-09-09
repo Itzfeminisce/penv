@@ -163,13 +163,6 @@ fn exit_codes_are_the_numbers_the_design_publishes() {
 }
 
 #[test]
-fn a_stub_command_refuses_with_exit_one() {
-    let error = CliError::not_in_this_build("push");
-    assert_eq!(error.exit, Exit::Error);
-    assert!(error.message.contains("penv push"));
-}
-
-#[test]
 fn columns_line_up() {
     let style = Output::new(Render {
         json: false,

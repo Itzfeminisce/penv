@@ -35,11 +35,16 @@ jobs:
           name=penv-${GITHUB_REF_NAME}-${{ matrix.target }}
           mkdir -p dist
           if [[ "${{ matrix.target }}" == *windows* ]]; then
-            7z a -tzip "dist/$name.zip" "./$out/penv.exe" >/dev/null
+            7z a -tzip "dist/$name.zip" "$out/penv.exe" >/dev/null
+            cp "$out/penv.exe" "dist/$name.exe"
+            assets=("$name.zip" "$name.exe")
           else
             tar -C "$out" -czf "dist/$name.tar.gz" penv
+            cp "$out/penv" "dist/$name"
+            assets=("$name.tar.gz" "$name")
           fi
-          (cd dist && sha256sum "$name".* > "$name.sha256")
+          sum() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+          (cd dist && sum "${assets[@]}" > "$name.sha256")
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

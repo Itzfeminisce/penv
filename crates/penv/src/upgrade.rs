@@ -1,0 +1,585 @@
+//! What `penv upgrade` works out before it touches the network or the disk:
+//! which release is newer, which asset this host runs, and how a running binary
+//! is swapped for the one that was downloaded.
+
+use std::cmp::Ordering;
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
+
+use crate::error::CliError;
+
+/// The targets the release workflow builds, by the constants a running binary
+/// reports for itself.
+pub const TARGETS: [(&str, &str, &str); 5] = [
+    ("x86_64", "linux", "x86_64-unknown-linux-musl"),
+    ("aarch64", "linux", "aarch64-unknown-linux-musl"),
+    ("x86_64", "macos", "x86_64-apple-darwin"),
+    ("aarch64", "macos", "aarch64-apple-darwin"),
+    ("x86_64", "windows", "x86_64-pc-windows-msvc"),
+];
+
+/// One release, narrowed to what this host would install.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picked {
+    pub tag: String,
+    pub asset: String,
+    pub asset_url: String,
+    pub checksum: String,
+    pub checksum_url: String,
+}
+
+pub fn triple(arch: &str, os: &str) -> Result<&'static str, CliError> {
+    TARGETS
+        .iter()
+        .find(|(a, o, _)| *a == arch && *o == os)
+        .map(|(_, _, triple)| *triple)
+        .ok_or_else(|| {
+            let known = TARGETS
+                .iter()
+                .map(|(_, _, triple)| *triple)
+                .collect::<Vec<_>>()
+                .join(", ");
+            CliError::new(
+                "unknown_target",
+                format!("penv publishes no build for {arch} on {os}."),
+                format!("The releases carry {known}. Build from source for anything else."),
+            )
+        })
+}
+
+/// `penv-v1.2.3-x86_64-pc-windows-msvc.exe`, the raw binary the upgrade replaces
+/// itself with. The archives beside it need a decompressor this binary has not got.
+pub fn asset_name(tag: &str, triple: &str) -> String {
+    let suffix = if triple.contains("windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    format!("penv-{tag}-{triple}{suffix}")
+}
+
+/// Every asset for one target shares the checksum file.
+pub fn checksum_name(tag: &str, triple: &str) -> String {
+    format!("penv-{tag}-{triple}.sha256")
+}
+
+/// The digest for one asset out of a `sha256sum` file. The name is matched whole,
+/// so the archive's line is never read for the raw binary, and the digest is only
+/// answered when it is the 64 hex characters sha256 spells.
+pub fn digest_in<'a>(sums: &'a str, asset: &str) -> Option<&'a str> {
+    sums.lines().find_map(|line| {
+        let (digest, name) = line.split_once(char::is_whitespace)?;
+        let digest = digest.trim();
+        let named = name.trim().trim_start_matches('*') == asset;
+        let hex = digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit());
+        (named && hex).then_some(digest)
+    })
+}
+
+/// The tag the release names. Without one there is nothing to compare against,
+/// so the answer is never "you are current".
+pub fn tag_of(release: &Value) -> Result<&str, CliError> {
+    release["tag_name"]
+        .as_str()
+        .filter(|tag| !tag.trim().is_empty())
+        .ok_or_else(|| {
+            CliError::new(
+                "no_release",
+                "the latest release carries no tag_name.",
+                "Try again later, or install from https://penv.cloud/install.",
+            )
+        })
+}
+
+/// The package managers that own the file they installed. Replacing a binary
+/// behind one of them leaves the manager describing a version that is gone.
+const MANAGERS: [(&str, &str, &str); 6] = [
+    ("/opt/homebrew/", "Homebrew", "brew upgrade penv"),
+    ("/usr/local/cellar/", "Homebrew", "brew upgrade penv"),
+    ("/home/linuxbrew/", "Homebrew", "brew upgrade penv"),
+    ("/nix/store/", "Nix", "nix profile upgrade penv"),
+    ("/microsoft/winget/", "winget", "winget upgrade penv"),
+    ("/scoop/apps/", "Scoop", "scoop update penv"),
+];
+
+/// The manager that installed this path, if one did, with the command that
+/// upgrades through it.
+pub fn manager(path: &Path) -> Option<(&'static str, &'static str)> {
+    let path = path.to_string_lossy().replace('\\', "/").to_lowercase();
+    MANAGERS
+        .iter()
+        .find(|(marker, _, _)| path.contains(marker))
+        .map(|(_, name, command)| (*name, *command))
+}
+
+/// How long until the rate limit lifts, from the epoch second a header carries.
+/// None once that second is behind us, since there is nothing left to wait for.
+pub fn resets_in(reset: u64, now: u64) -> Option<String> {
+    let left = reset.checked_sub(now).filter(|left| *left > 0)?;
+    Some(if left < 90 {
+        format!("in {left}s")
+    } else {
+        format!("in {}m", left.div_ceil(60))
+    })
+}
+
+/// The `owner/repo` out of the repository URL Cargo.toml carries.
+pub fn repo_slug(repository: &str) -> Option<(&str, &str)> {
+    let path = repository.trim_end_matches('/').trim_end_matches(".git");
+    let mut segments = path
+        .split_once("github.com")?
+        .1
+        .trim_start_matches(['/', ':'])
+        .split('/');
+    let owner = segments.next().filter(|s| !s.is_empty())?;
+    let repo = segments.next().filter(|s| !s.is_empty())?;
+    segments.next().is_none().then_some((owner, repo))
+}
+
+pub fn releases_url(owner: &str, repo: &str) -> String {
+    format!("https://api.github.com/repos/{owner}/{repo}/releases/latest")
+}
+
+/// The tag and the two URLs this host needs, out of the release JSON.
+pub fn pick(release: &Value, triple: &str) -> Result<Picked, CliError> {
+    let tag = tag_of(release)?;
+    let asset = asset_name(tag, triple);
+    let checksum = checksum_name(tag, triple);
+    let url_of = |name: &str| {
+        release["assets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|a| a["name"].as_str() == Some(name))
+            .and_then(|a| a["browser_download_url"].as_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                CliError::new(
+                    "missing_asset",
+                    format!("release {tag} carries no {name}."),
+                    "Install from https://penv.cloud/install until that release is fixed.",
+                )
+            })
+    };
+    Ok(Picked {
+        tag: tag.to_string(),
+        asset_url: url_of(&asset)?,
+        checksum_url: url_of(&checksum)?,
+        asset,
+        checksum,
+    })
+}
+
+/// True when the release is ahead of what is running.
+pub fn is_newer(latest: &str, running: &str) -> bool {
+    compare(latest, running) == Ordering::Greater
+}
+
+/// Semantic versions, as far as penv tags go: a numeric triple, and a prerelease
+/// suffix that sorts below the release it leads to.
+pub fn compare(a: &str, b: &str) -> Ordering {
+    let (core_a, pre_a) = split(a);
+    let (core_b, pre_b) = split(b);
+    match core_a.cmp(&core_b) {
+        Ordering::Equal => match (pre_a, pre_b) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(x), Some(y)) => prerelease(x, y),
+        },
+        other => other,
+    }
+}
+
+fn split(version: &str) -> ([u64; 3], Option<&str>) {
+    let version = version.trim().trim_start_matches('v');
+    let version = version.split('+').next().unwrap_or_default();
+    let (core, pre) = match version.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (version, None),
+    };
+    let mut parts = core.split('.');
+    let mut number = || {
+        parts
+            .next()
+            .and_then(|p| p.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    ([number(), number(), number()], pre)
+}
+
+/// Dot-separated identifiers, numeric ones by value, so `alpha.10` is above
+/// `alpha.2`. Fewer identifiers sort first.
+fn prerelease(a: &str, b: &str) -> Ordering {
+    let mut left = a.split('.');
+    let mut right = b.split('.');
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let order = match (x.parse::<u64>(), y.parse::<u64>()) {
+                    (Ok(x), Ok(y)) => x.cmp(&y),
+                    (Ok(_), Err(_)) => Ordering::Less,
+                    (Err(_), Ok(_)) => Ordering::Greater,
+                    (Err(_), Err(_)) => x.cmp(y),
+                };
+                if order != Ordering::Equal {
+                    return order;
+                }
+            }
+        }
+    }
+}
+
+/// Where the download lands before it takes the running binary's place.
+pub fn staged(current: &Path) -> PathBuf {
+    beside(current, "new")
+}
+
+/// Where the running binary goes while the new one lands, since no platform
+/// renames reliably over a file it is executing.
+pub fn retired(current: &Path) -> PathBuf {
+    beside(current, "old")
+}
+
+fn beside(current: &Path, extension: &str) -> PathBuf {
+    let stem = current
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "penv".to_string());
+    current.with_file_name(format!("{stem}.{extension}"))
+}
+
+/// What went wrong swapping the binary. A lost restore is its own case, because
+/// the file the caller ran is no longer there.
+#[derive(Debug)]
+pub enum Swap {
+    /// Nothing moved, or the running binary was put back.
+    Kept(std::io::Error),
+    /// The staged binary did not land and the running one could not be restored.
+    Lost(std::io::Error),
+}
+
+impl std::fmt::Display for Swap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Swap::Kept(e) | Swap::Lost(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Write the downloaded binary where the running one is. The running binary is
+/// retired first, since no platform can be relied on to rename over a file it is
+/// executing; Unix deletes the retired copy once the new one is in, and Windows
+/// leaves it for the next invocation to sweep.
+pub fn replace(current: &Path, bytes: &[u8]) -> Result<(), Swap> {
+    let staged = staged(current);
+    let retired = retired(current);
+    let _ = std::fs::remove_file(&retired);
+
+    std::fs::write(&staged, bytes).map_err(Swap::Kept)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(Swap::Kept(e));
+        }
+    }
+
+    if let Err(e) = std::fs::rename(current, &retired) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(Swap::Kept(e));
+    }
+    if let Err(e) = std::fs::rename(&staged, current) {
+        let _ = std::fs::remove_file(&staged);
+        return match std::fs::rename(&retired, current) {
+            Ok(()) => Err(Swap::Kept(e)),
+            Err(restore) => Err(Swap::Lost(restore)),
+        };
+    }
+    if !cfg!(windows) {
+        let _ = std::fs::remove_file(&retired);
+    }
+    Ok(())
+}
+
+/// The copy Windows had to keep last time, gone as soon as it is not running.
+/// One stat per invocation, and nothing at all anywhere else.
+pub fn sweep_retired() {
+    if !cfg!(windows) {
+        return;
+    }
+    let Ok(current) = std::env::current_exe() else {
+        return;
+    };
+    let retired = retired(&current);
+    if retired.exists() {
+        let _ = std::fs::remove_file(retired);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_release_is_newer_only_when_its_numbers_are() {
+        assert!(is_newer("v1.2.3", "1.2.2"));
+        assert!(is_newer("1.10.0", "1.9.9"));
+        assert!(is_newer("2.0.0", "1.99.99"));
+        assert!(!is_newer("1.2.3", "1.2.3"));
+        assert!(!is_newer("v1.2.3", "1.2.3"));
+        assert!(!is_newer("1.2.2", "1.2.3"));
+    }
+
+    #[test]
+    fn a_prerelease_sorts_below_the_release_it_leads_to() {
+        assert!(is_newer("1.0.0", "1.0.0-alpha.1"));
+        assert!(!is_newer("1.0.0-alpha.1", "1.0.0"));
+        assert!(is_newer("1.0.0-alpha.2", "1.0.0-alpha.1"));
+        assert!(is_newer("1.0.0-alpha.10", "1.0.0-alpha.2"));
+        assert!(is_newer("1.0.0-beta.1", "1.0.0-alpha.9"));
+        assert_eq!(compare("1.0.0-alpha.1", "1.0.0-alpha.1"), Ordering::Equal);
+        assert_eq!(compare("1.0.0+build.5", "1.0.0"), Ordering::Equal);
+    }
+
+    #[test]
+    fn every_target_the_workflow_builds_is_one_a_running_binary_can_ask_for() {
+        assert_eq!(
+            triple("x86_64", "linux").unwrap(),
+            "x86_64-unknown-linux-musl"
+        );
+        assert_eq!(triple("aarch64", "macos").unwrap(), "aarch64-apple-darwin");
+        assert_eq!(
+            triple("x86_64", "windows").unwrap(),
+            "x86_64-pc-windows-msvc"
+        );
+        let refused = triple("riscv64", "linux").unwrap_err();
+        assert_eq!(refused.code, "unknown_target");
+        assert!(
+            refused.fix.contains("x86_64-unknown-linux-musl"),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn only_a_windows_asset_carries_an_exe_suffix() {
+        assert_eq!(
+            asset_name("v1.2.3", "x86_64-unknown-linux-musl"),
+            "penv-v1.2.3-x86_64-unknown-linux-musl"
+        );
+        assert_eq!(
+            asset_name("v1.2.3", "x86_64-pc-windows-msvc"),
+            "penv-v1.2.3-x86_64-pc-windows-msvc.exe"
+        );
+        assert_eq!(
+            checksum_name("v1.2.3", "x86_64-pc-windows-msvc"),
+            "penv-v1.2.3-x86_64-pc-windows-msvc.sha256"
+        );
+    }
+
+    /// Obviously fake, and still the 64 hex characters a real digest is.
+    const ARCHIVE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const STAR: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn the_archive_line_is_never_read_for_the_raw_binary() {
+        let sums = format!(
+            "{ARCHIVE}  penv-v1.2.3-x86_64-unknown-linux-musl.tar.gz\n\
+             {STAR}  penv-v1.2.3-x86_64-unknown-linux-musl\n"
+        );
+        let sums = sums.as_str();
+        assert_eq!(
+            digest_in(sums, "penv-v1.2.3-x86_64-unknown-linux-musl"),
+            Some(STAR)
+        );
+        assert_eq!(digest_in(sums, "penv-v1.2.3-aarch64-apple-darwin"), None);
+        assert_eq!(
+            digest_in(&format!("{STAR} *penv-v1.2.3\n"), "penv-v1.2.3"),
+            Some(STAR)
+        );
+    }
+
+    #[test]
+    fn a_line_that_is_not_a_sha256_names_no_digest() {
+        assert_eq!(digest_in("cccc  penv-v1.2.3\n", "penv-v1.2.3"), None);
+        assert_eq!(
+            digest_in(&format!("{}  penv-v1.2.3\n", "z".repeat(64)), "penv-v1.2.3"),
+            None
+        );
+        assert_eq!(
+            digest_in(&format!("{STAR}0  penv-v1.2.3\n"), "penv-v1.2.3"),
+            None
+        );
+    }
+
+    fn release() -> Value {
+        let asset = |name: &str| {
+            json!({
+                "name": name,
+                "browser_download_url": format!("https://example.test/{name}"),
+            })
+        };
+        json!({
+            "tag_name": "v1.2.3",
+            "assets": [
+                asset("penv-v1.2.3-x86_64-unknown-linux-musl.tar.gz"),
+                asset("penv-v1.2.3-x86_64-unknown-linux-musl"),
+                asset("penv-v1.2.3-x86_64-unknown-linux-musl.sha256"),
+                asset("penv-v1.2.3-aarch64-apple-darwin"),
+            ],
+        })
+    }
+
+    #[test]
+    fn the_release_answers_with_the_asset_this_host_runs() {
+        let picked = pick(&release(), "x86_64-unknown-linux-musl").unwrap();
+        assert_eq!(picked.tag, "v1.2.3");
+        assert_eq!(picked.asset, "penv-v1.2.3-x86_64-unknown-linux-musl");
+        assert_eq!(
+            picked.asset_url,
+            "https://example.test/penv-v1.2.3-x86_64-unknown-linux-musl"
+        );
+        assert_eq!(
+            picked.checksum_url,
+            "https://example.test/penv-v1.2.3-x86_64-unknown-linux-musl.sha256"
+        );
+    }
+
+    #[test]
+    fn a_release_missing_this_hosts_asset_is_named_rather_than_guessed() {
+        let refused = pick(&release(), "aarch64-apple-darwin").unwrap_err();
+        assert_eq!(refused.code, "missing_asset");
+        assert!(refused.message.contains(".sha256"), "{refused:?}");
+    }
+
+    fn workspace(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("penv-upgrade-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_new_binary_takes_the_running_ones_place() {
+        let dir = workspace("swap");
+        let current = dir.join(if cfg!(windows) { "penv.exe" } else { "penv" });
+        std::fs::write(&current, b"old binary").unwrap();
+        std::fs::write(retired(&current), b"a leftover from last time").unwrap();
+
+        replace(&current, b"new binary").unwrap();
+
+        assert_eq!(std::fs::read(&current).unwrap(), b"new binary");
+        assert!(
+            !staged(&current).exists(),
+            "the staged file was left behind"
+        );
+        if cfg!(windows) {
+            assert_eq!(std::fs::read(retired(&current)).unwrap(), b"old binary");
+        } else {
+            assert!(
+                !retired(&current).exists(),
+                "Unix has nothing to keep the retired binary for"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_swap_that_never_starts_leaves_no_staged_file() {
+        let dir = workspace("nostart");
+        let current = dir.join("penv");
+
+        let refused = replace(&current, b"new binary").unwrap_err();
+
+        assert!(matches!(refused, Swap::Kept(_)), "{refused:?}");
+        assert!(!staged(&current).exists(), "penv.new was left behind");
+        assert!(!current.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_managed_install_is_named_by_the_manager_that_owns_it() {
+        assert_eq!(
+            manager(Path::new("/opt/homebrew/bin/penv")),
+            Some(("Homebrew", "brew upgrade penv"))
+        );
+        assert_eq!(
+            manager(Path::new("/usr/local/Cellar/penv/1.0.0/bin/penv")),
+            Some(("Homebrew", "brew upgrade penv"))
+        );
+        assert_eq!(
+            manager(Path::new("/home/linuxbrew/.linuxbrew/bin/penv")),
+            Some(("Homebrew", "brew upgrade penv"))
+        );
+        assert_eq!(
+            manager(Path::new("/nix/store/abc-penv-1.0.0/bin/penv")).map(|(name, _)| name),
+            Some("Nix")
+        );
+        assert_eq!(
+            manager(Path::new(
+                r"C:\Users\dev\AppData\Local\Microsoft\WinGet\Packages\penv\penv.exe"
+            ))
+            .map(|(_, command)| command),
+            Some("winget upgrade penv")
+        );
+        assert_eq!(
+            manager(Path::new(r"C:\Users\dev\scoop\apps\penv\current\penv.exe"))
+                .map(|(_, command)| command),
+            Some("scoop update penv")
+        );
+        assert_eq!(manager(Path::new("/usr/local/bin/penv")), None);
+        assert_eq!(manager(Path::new(r"C:\tools\penv.exe")), None);
+    }
+
+    #[test]
+    fn a_release_with_no_tag_is_no_release_rather_than_the_current_one() {
+        let refused = tag_of(&json!({ "assets": [] })).unwrap_err();
+        assert_eq!(refused.code, "no_release");
+        assert_eq!(
+            tag_of(&json!({ "tag_name": "" })).unwrap_err().code,
+            "no_release"
+        );
+        assert_eq!(tag_of(&json!({ "tag_name": "v1.2.3" })).unwrap(), "v1.2.3");
+    }
+
+    #[test]
+    fn a_rate_limit_reset_reads_as_the_wait_it_leaves() {
+        assert_eq!(resets_in(1_000_030, 1_000_000), Some("in 30s".to_string()));
+        assert_eq!(resets_in(1_000_600, 1_000_000), Some("in 10m".to_string()));
+        assert_eq!(resets_in(1_000_601, 1_000_000), Some("in 11m".to_string()));
+        assert_eq!(resets_in(1_000_000, 1_000_000), None);
+        assert_eq!(resets_in(999_000, 1_000_000), None);
+    }
+
+    #[test]
+    fn the_repository_field_names_the_owner_and_the_repo() {
+        assert_eq!(
+            repo_slug("https://github.com/Itzfeminisce/penvhq"),
+            Some(("Itzfeminisce", "penvhq"))
+        );
+        assert_eq!(
+            repo_slug("git@github.com:Itzfeminisce/penvhq.git"),
+            Some(("Itzfeminisce", "penvhq"))
+        );
+        assert_eq!(repo_slug("https://example.test/penv"), None);
+        assert_eq!(
+            repo_slug(env!("CARGO_PKG_REPOSITORY")),
+            Some(("Itzfeminisce", "penvhq"))
+        );
+    }
+
+    #[test]
+    fn the_staged_and_retired_names_sit_beside_the_binary() {
+        let current = Path::new("/usr/local/bin/penv");
+        assert_eq!(staged(current), Path::new("/usr/local/bin/penv.new"));
+        assert_eq!(retired(current), Path::new("/usr/local/bin/penv.old"));
+        let windows = Path::new("C:/tools/penv.exe");
+        assert_eq!(staged(windows), Path::new("C:/tools/penv.new"));
+    }
+}

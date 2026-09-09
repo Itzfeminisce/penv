@@ -6,6 +6,7 @@ pub mod cache;
 pub mod clock;
 pub mod credential;
 pub mod error;
+pub mod fetch;
 pub mod keychain;
 
 pub use api::{
@@ -20,4 +21,5 @@ pub use credential::{
     AwsIam, BoundKeypair, Enrolled, Obtain, Oidc, TOKEN_VAR, Token, present, resolve,
 };
 pub use error::{ApiError, CloudError, Result};
+pub use fetch::sha256_hex;
 pub use keychain::{Keychain, Keyring, MemoryKeychain, NoKeychain};

@@ -18,6 +18,11 @@ struct Meta {
     human_flags: &'static [&'static str],
     /// Flags that also read an environment variable.
     env_flags: &'static [(&'static str, &'static str)],
+    /// Word lists for positionals, where the list lives outside clap.
+    arg_values: &'static [(&'static str, &'static [&'static str])],
+    /// Positionals the system answers for: `command` is an executable and its
+    /// arguments. Completions hand those to the shell instead of a word list.
+    arg_completes: &'static [(&'static str, &'static str)],
 }
 
 const DEFAULT_META: Meta = Meta {
@@ -28,6 +33,8 @@ const DEFAULT_META: Meta = Meta {
     exit_codes: &[0, 1],
     human_flags: &[],
     env_flags: &[],
+    arg_values: &[],
+    arg_completes: &[],
 };
 
 const META: &[Meta] = &[
@@ -48,6 +55,7 @@ const META: &[Meta] = &[
         exit_codes: &[0, 1, 3, 5, 6],
         human_flags: &["no-mask"],
         env_flags: &[("env", "PENV_ENV")],
+        arg_completes: &[("command", "command")],
         ..DEFAULT_META
     },
     Meta {
@@ -141,10 +149,13 @@ const META: &[Meta] = &[
     },
     Meta {
         path: "upgrade",
+        implemented: true,
         ..DEFAULT_META
     },
     Meta {
         path: "completions",
+        implemented: true,
+        arg_values: &[("shell", &crate::completions::SHELLS)],
         ..DEFAULT_META
     },
     Meta {
@@ -207,7 +218,7 @@ fn describe(cmd: &Command, prefix: &str) -> Value {
     let args: Vec<Value> = cmd
         .get_arguments()
         .filter(|a| a.is_positional() && !is_builtin(a))
-        .map(positional)
+        .map(|a| positional(a, m))
         .collect();
     let flags: Vec<Value> = cmd
         .get_arguments()
@@ -236,13 +247,35 @@ fn is_builtin(arg: &Arg) -> bool {
     matches!(arg.get_id().as_str(), "help" | "version")
 }
 
-fn positional(arg: &Arg) -> Value {
+fn positional(arg: &Arg, m: &Meta) -> Value {
+    let name = arg.get_id().as_str();
+    let mut values = possible(arg);
+    if values.is_empty()
+        && let Some((_, listed)) = m.arg_values.iter().find(|(arg, _)| *arg == name)
+    {
+        values = listed.iter().map(|v| v.to_string()).collect();
+    }
     json!({
-        "name": arg.get_id().as_str(),
+        "name": name,
         "about": arg.get_help().map(|h| h.to_string()),
         "required": arg.is_required_set(),
         "variadic": arg.get_num_args().is_some_and(|r| r.max_values() > 1),
+        "values": values,
+        "completes": m
+            .arg_completes
+            .iter()
+            .find(|(arg, _)| *arg == name)
+            .map(|(_, kind)| *kind),
     })
+}
+
+/// The words clap accepts for one argument. Completions hint with them.
+fn possible(arg: &Arg) -> Vec<String> {
+    arg.get_possible_values()
+        .iter()
+        .filter(|v| !v.is_hide_set())
+        .map(|v| v.get_name().to_string())
+        .collect()
 }
 
 fn flag(arg: &Arg, m: &Meta) -> Value {
@@ -264,6 +297,7 @@ fn flag(arg: &Arg, m: &Meta) -> Value {
             .find(|(flag, _)| *flag == name)
             .map(|(_, var)| *var),
         "human": m.human_flags.contains(&name.as_str()),
+        "values": possible(arg),
     })
 }
 

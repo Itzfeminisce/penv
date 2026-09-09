@@ -79,8 +79,8 @@ cloud   @penv header, credential in the keychain, .env absent (or present only a
 | `guard [--check]` | Writes every recognised harness config; `--check` reports coverage | `init`; any command that detects a new harness |
 | `reveal KEY` | Prints one value after console approval | never; refused outright in an agent session |
 | `machine enroll <secret>` | Binds a server keypair from a one-time secret | never |
-| `upgrade` | Replaces the binary from the signed GitHub release | any command reads a schema newer than it understands |
-| `completions <shell>` | From the manifest | never |
+| `upgrade` | Replaces this binary with the raw asset for its target from the latest GitHub release, after checking the digest the release publishes. `--check` reports what the release carries and changes nothing | never on its own; a schema this build cannot read names the command in its refusal |
+| `completions <shell>` | Writes the completion script for bash, zsh, fish, powershell or elvish, generated from the manifest | never |
 | `help --json` | The command manifest | never |
 
 Not commands: `env`/`use` (use `--env` or `PENV_ENV`, default `development`), `config`, `doctor` (it is `check`), `agent` (agents are detected).
@@ -95,7 +95,7 @@ Not commands: `env`/`use` (use `--env` or `PENV_ENV`, default `development`), `c
 - Exit codes: 0 ok, 1 error, 2 auth, 3 validation, 4 confirmation required (JSON carries the exact replay command), 5 no credential, 6 environment refused. `help --json` publishes the table.
 
 ### The manifest
-`penv help --json` emits every command with args, flags (`env` var alias, `default`, `human: true` for flags stripped under agent policy), `revealsValues`, `requiresApproval`, and per-command exit codes, plus `schemaVersion`. The docs generator, completions and the agent skill consume it. Nothing about commands is hand-written twice.
+`penv help --json` emits every command with args, flags (`env` var alias, `default`, `human: true` for flags stripped under agent policy), the `values` an argument accepts where the list is fixed and the `completes` hint where the system answers instead, `revealsValues`, `requiresApproval`, and per-command exit codes, plus `schemaVersion`. The docs generator, completions and the agent skill consume it. Nothing about commands is hand-written twice.
 
 ## 5. `run`
 
@@ -191,7 +191,7 @@ Only the cloud sentence is marketed. Both are printed by `guard --check`.
 
 ## 10. Distribution
 
-GitHub Releases are the source of truth: signed archives for linux x86_64/aarch64 (musl), macOS x86_64/aarch64, windows x86_64. Install paths: `curl -fsSL https://penv.cloud/install | sh`, Homebrew tap, winget, a Docker image `penvhq/cli`, and the npm name `@penvhq/cli` as a downloader shim. Release builds run only in CI; this development machine runs `cargo check` and `cargo test` with two jobs.
+GitHub Releases are the source of truth: archives for linux x86_64/aarch64 (musl), macOS x86_64/aarch64, windows x86_64, and beside each archive the raw binary `penv-<tag>-<target>`, which is what `upgrade` downloads because the binary carries no decompressor. One `penv-<tag>-<target>.sha256` covers both. `upgrade` verifies that digest; signing the checksum file is pending, and the verification site is marked for it. Install paths: `curl -fsSL https://penv.cloud/install | sh`, Homebrew tap, winget, a Docker image `penvhq/cli`, and the npm name `@penvhq/cli` as a downloader shim. Release builds run only in CI; this development machine runs `cargo check` and `cargo test` with two jobs.
 
 ## 11. Crate layout
 

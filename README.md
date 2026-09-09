@@ -103,9 +103,23 @@ The claim penv makes, printed by `penv guard --check`, is only what is true: it 
 | `reveal KEY` | One value, after console approval |
 | `login` / `logout` | Device code, credential in the OS keychain |
 | `machine enroll` | Bind a server keypair |
+| `upgrade [--check]` | Replace this binary from the latest GitHub release |
+| `completions <shell>` | The completion script for your shell |
 | `help --json` | The command manifest |
 
 JSON when stdout is not a terminal. Exit codes: 0 ok, 1 error, 2 auth, 3 validation, 4 confirmation required, 5 no credential, 6 environment refused.
+
+## Completions
+
+```bash
+penv completions bash > ~/.local/share/bash-completion/completions/penv
+penv completions zsh > ~/.zfunc/_penv                  # a directory on your $fpath
+penv completions fish > ~/.config/fish/completions/penv.fish
+penv completions powershell >> $PROFILE
+penv completions elvish >> ~/.config/elvish/rc.elv
+```
+
+The scripts are generated from the same manifest `penv help --json` publishes, so they never fall behind the commands.
 
 ## Status
 

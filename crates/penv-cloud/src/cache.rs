@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::api::{Address, Api, Bearer, EnvBody, Fetched, Freshness};
 use crate::b64;
 use crate::error::{CloudError, Result};
+use crate::fetch::sha256_hex;
 use crate::keychain::{self, Keychain};
 
 /// The environment a stale cache may still answer for.
@@ -272,7 +272,7 @@ fn cache_key(store: &dyn Keychain) -> Result<[u8; 32]> {
 
 /// One server's files, so signing out can take that server's cache with it.
 pub fn dir_for(dir: &Path, base_url: &str) -> PathBuf {
-    dir.join(&digest_hex(base_url.as_bytes())[..32])
+    dir.join(&sha256_hex(base_url.as_bytes())[..32])
 }
 
 /// Everything cached for one server. Signing out leaves nothing behind.
@@ -283,7 +283,7 @@ pub fn forget(dir: &Path, base_url: &str) {
 /// The file name: one hash of the server and the address, so no path on disk
 /// names a project.
 fn name_of(base_url: &str, address: &Address) -> String {
-    digest_hex(format!("{base_url}|{address}").as_bytes())
+    sha256_hex(format!("{base_url}|{address}").as_bytes())
 }
 
 /// The server, the address and the credential, bound into the ciphertext: a
@@ -292,18 +292,8 @@ fn name_of(base_url: &str, address: &Address) -> String {
 pub fn aad_of(base_url: &str, address: &Address, bearer: &Bearer) -> String {
     format!(
         "{base_url}|{address}|{}",
-        digest_hex(bearer.token.as_bytes())
+        sha256_hex(bearer.token.as_bytes())
     )
-}
-
-fn digest_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    Sha256::digest(bytes)
-        .iter()
-        .fold(String::with_capacity(64), |mut out, byte| {
-            let _ = write!(out, "{byte:02x}");
-            out
-        })
 }
 
 /// A file only this account can read. Windows keeps the directory's own ACL,

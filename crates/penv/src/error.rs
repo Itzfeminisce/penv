@@ -62,13 +62,4 @@ impl CliError {
     pub fn to_json(&self) -> Value {
         json!({ "error": self.code, "message": self.message, "fix": self.fix })
     }
-
-    /// Every command that is not in this build refuses the same way.
-    pub fn not_in_this_build(command: &str) -> CliError {
-        CliError::new(
-            "not_implemented",
-            format!("penv {command} is not yet in this build."),
-            "Run penv help --json for the commands this build carries.",
-        )
-    }
 }

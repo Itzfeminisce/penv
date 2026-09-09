@@ -95,13 +95,19 @@
     },
     "arg": {
       "type": "object",
-      "required": ["name", "about", "required", "variadic"],
+      "required": ["name", "about", "required", "variadic", "values", "completes"],
       "additionalProperties": false,
       "properties": {
         "name": { "type": "string" },
         "about": { "type": ["string", "null"] },
         "required": { "type": "boolean" },
-        "variadic": { "type": "boolean" }
+        "variadic": { "type": "boolean" },
+        "values": { "$ref": "#/$defs/values" },
+        "completes": {
+          "description": "What the system answers for this argument when no word list can: a command is an executable and its arguments. Completions hand it to the shell.",
+          "type": ["string", "null"],
+          "enum": ["command", null]
+        }
       }
     },
     "flag": {
@@ -114,7 +120,8 @@
         "takesValue",
         "default",
         "env",
-        "human"
+        "human",
+        "values"
       ],
       "additionalProperties": false,
       "properties": {
@@ -131,8 +138,14 @@
         "human": {
           "description": "True when an agent policy strips the flag, because only a person may pass it.",
           "type": "boolean"
-        }
+        },
+        "values": { "$ref": "#/$defs/values" }
       }
+    },
+    "values": {
+      "description": "The fixed word list this argument accepts, empty when it takes anything. Completions hint with it.",
+      "type": "array",
+      "items": { "type": "string" }
     },
     "exitCode": {
       "type": "object",

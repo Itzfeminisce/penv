@@ -7,6 +7,7 @@ use penv::error::Exit;
 use penv::output::{Output, resolve};
 
 fn main() {
+    penv::upgrade::sweep_retired();
     let cli = Cli::parse_checked();
     let env = Env::from_process();
     let out = Output::new(resolve(

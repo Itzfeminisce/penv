@@ -99,6 +99,17 @@ fn an_unknown_decorator_names_the_line() {
 }
 
 #[test]
+fn a_schema_this_build_cannot_read_gives_the_cause_before_the_fix() {
+    let err = parse("# @schema=2\n\n# @type=string\nAPI_HOST=\n").unwrap_err();
+    assert_eq!(err[0].code, "schema_too_new");
+    let message = &err[0].message;
+    let cause = message.find("version 2").expect(message);
+    let fix = message.find("run penv upgrade").expect(message);
+    assert!(cause < fix, "{message}");
+    assert!(message.contains("reads up to 1"), "{message}");
+}
+
+#[test]
 fn decorators_are_order_insensitive_and_take_quoted_values() {
     let a = parse("# @rotate=30d @type=string @deprecated=\"use API_HOST\"\nOLD_HOST=\n").unwrap();
     let b = parse("# @deprecated=\"use API_HOST\" @type=string @rotate=30d\nOLD_HOST=\n").unwrap();

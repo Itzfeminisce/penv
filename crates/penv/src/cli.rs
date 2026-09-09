@@ -185,8 +185,12 @@ pub enum Command {
         command: MachineCommand,
     },
 
-    /// Replace this binary from the signed GitHub release
-    Upgrade,
+    /// Replace this binary from the latest GitHub release
+    Upgrade {
+        /// Report what the release carries instead of replacing anything
+        #[arg(long)]
+        check: bool,
+    },
 
     /// Print the shell completion script
     Completions {
