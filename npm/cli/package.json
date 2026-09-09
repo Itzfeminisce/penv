@@ -1,0 +1,24 @@
+{
+  "name": "@penvhq/cli",
+  "version": "0.0.0",
+  "description": "penv, the CLI of penv.cloud: validate your .env, type it, and keep it out of your coding agent's reach.",
+  "license": "MIT",
+  "homepage": "https://penv.cloud",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "penv": "bin/penv.js"
+  },
+  "files": [
+    "bin/penv.js"
+  ],
+  "optionalDependencies": {
+    "@penvhq/cli-linux-x64": "0.0.0",
+    "@penvhq/cli-linux-arm64": "0.0.0",
+    "@penvhq/cli-darwin-x64": "0.0.0",
+    "@penvhq/cli-darwin-arm64": "0.0.0",
+    "@penvhq/cli-win32-x64": "0.0.0",
+    "@penvhq/cli-win32-arm64": "0.0.0"
+  }
+}

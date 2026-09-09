@@ -45,7 +45,7 @@ complete -c penv -n '__fish_penv_at ""' -a 'gen' -d 'Write the typed file for a 
 complete -c penv -n '__fish_penv_at ""' -a 'guard' -d 'Write the harness rules that keep agents out of .env'
 complete -c penv -n '__fish_penv_at ""' -a 'reveal' -d 'Print one value after console approval'
 complete -c penv -n '__fish_penv_at ""' -a 'machine' -d 'Machine identities'
-complete -c penv -n '__fish_penv_at ""' -a 'upgrade' -d 'Replace this binary from the latest GitHub release'
+complete -c penv -n '__fish_penv_at ""' -a 'upgrade' -d 'Replace this binary from the latest release'
 complete -c penv -n '__fish_penv_at ""' -a 'completions' -d 'Print the shell completion script'
 complete -c penv -n '__fish_penv_at ""' -a 'hook' -d 'Run as a harness hook; a payload it cannot read is refused'
 complete -c penv -n '__fish_penv_at ""' -a 'schema' -d 'Print the schema as JSON'

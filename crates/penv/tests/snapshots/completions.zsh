@@ -18,7 +18,7 @@ _penv() {
         'guard:Write the harness rules that keep agents out of .env'
         'reveal:Print one value after console approval'
         'machine:Machine identities'
-        'upgrade:Replace this binary from the latest GitHub release'
+        'upgrade:Replace this binary from the latest release'
         'completions:Print the shell completion script'
         'hook:Run as a harness hook; a payload it cannot read is refused'
         'schema:Print the schema as JSON'

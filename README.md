@@ -6,6 +6,7 @@
 </p>
 
 <p align="center">
+  <a href="#install">Install</a> ·
   <a href="#the-first-minute">First minute</a> ·
   <a href="#with-a-team">With a team</a> ·
   <a href="#coding-agents">Coding agents</a> ·
@@ -17,15 +18,31 @@
 
 penv reads the `.env` you already have, writes a small committed schema next to it, validates every value before your process starts, generates types for your language, and configures your coding agent's harness so it cannot read the file. When you are ready for a team, one command moves the values to [penv.cloud](https://penv.cloud) and deletes the file.
 
+## Install
+
+```bash
+curl -fsSL https://penv.cloud/install | sh   # macOS, Linux
+```
+
+```powershell
+irm https://penv.cloud/install.ps1 | iex     # Windows
+```
+
+```bash
+npm i -g @penvhq/cli                         # any of them, when npm should own it
+```
+
+The first two put one static binary in `~/.penv/bin`, or `%USERPROFILE%\.penv\bin` on Windows, and print the line that adds it to your PATH; no rc file is edited and nothing else is written. `PENV_INSTALL_DIR` moves it, `PENV_VERSION` pins a tag, and every download is checked against the digest the release publishes before it lands. The PowerShell one writes your user PATH when you ask: `-AddToPath` when you run the file, `$env:PENV_ADD_TO_PATH = '1'` when you pipe it through `iex`, which has no flags to pass. Builds: linux and macOS on x86\_64 and arm64, Windows on x86\_64 and arm64.
+
+`penv upgrade` replaces the binary those two installers placed. It refuses on an npm install, where the binary lives inside `node_modules` and `npm i -g @penvhq/cli` is the upgrade, and likewise under Homebrew, Nix, winget and Scoop.
+
 ## The first minute
 
 No account, no sign-in.
 
 ```bash
-curl -fsSL https://penv.cloud/install | sh    # one binary, no Node
-
-penv init                                     # reads .env, writes .env.schema, gitignores .env
-penv run -- pnpm dev                          # validates, injects, masks
+penv init                 # reads .env, writes .env.schema, gitignores .env
+penv run -- pnpm dev      # validates, injects, masks
 ```
 
 `init` writes this, and only this, into your repository:
@@ -103,7 +120,7 @@ The claim penv makes, printed by `penv guard --check`, is only what is true: it 
 | `reveal KEY` | One value, after console approval |
 | `login` / `logout` | Device code, credential in the OS keychain |
 | `machine enroll` | Bind a server keypair |
-| `upgrade [--check]` | Replace this binary from the latest GitHub release |
+| `upgrade [--check]` | Replace this binary from the latest release |
 | `completions <shell>` | The completion script for your shell |
 | `help --json` | The command manifest |
 

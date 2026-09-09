@@ -11,12 +11,13 @@ use crate::error::CliError;
 
 /// The targets the release workflow builds, by the constants a running binary
 /// reports for itself.
-pub const TARGETS: [(&str, &str, &str); 5] = [
+pub const TARGETS: [(&str, &str, &str); 6] = [
     ("x86_64", "linux", "x86_64-unknown-linux-musl"),
     ("aarch64", "linux", "aarch64-unknown-linux-musl"),
     ("x86_64", "macos", "x86_64-apple-darwin"),
     ("aarch64", "macos", "aarch64-apple-darwin"),
     ("x86_64", "windows", "x86_64-pc-windows-msvc"),
+    ("aarch64", "windows", "aarch64-pc-windows-msvc"),
 ];
 
 /// One release, narrowed to what this host would install.
@@ -94,7 +95,9 @@ pub fn tag_of(release: &Value) -> Result<&str, CliError> {
 
 /// The package managers that own the file they installed. Replacing a binary
 /// behind one of them leaves the manager describing a version that is gone.
-const MANAGERS: [(&str, &str, &str); 6] = [
+const MANAGERS: [(&str, &str, &str); 7] = [
+    // npm leads: a global install lands under whichever prefix installed node, Homebrew's included.
+    ("/node_modules/", "npm", "npm i -g @penvhq/cli"),
     ("/opt/homebrew/", "Homebrew", "brew upgrade penv"),
     ("/usr/local/cellar/", "Homebrew", "brew upgrade penv"),
     ("/home/linuxbrew/", "Homebrew", "brew upgrade penv"),
@@ -124,25 +127,27 @@ pub fn resets_in(reset: u64, now: u64) -> Option<String> {
     })
 }
 
-/// The `owner/repo` out of the repository URL Cargo.toml carries.
-pub fn repo_slug(repository: &str) -> Option<(&str, &str)> {
-    let path = repository.trim_end_matches('/').trim_end_matches(".git");
-    let mut segments = path
-        .split_once("github.com")?
-        .1
-        .trim_start_matches(['/', ':'])
-        .split('/');
-    let owner = segments.next().filter(|s| !s.is_empty())?;
-    let repo = segments.next().filter(|s| !s.is_empty())?;
-    segments.next().is_none().then_some((owner, repo))
+/// The one address a build carries. Which repository stands behind it is Cargo.toml
+/// metadata and a redirect penv.cloud owns, so moving the repository installs nothing new.
+pub const RELEASE_BASE: &str = "https://penv.cloud";
+
+/// The release JSON, behind a redirect to the API that serves it.
+pub fn latest_url(base: &str) -> String {
+    format!("{}/releases/latest", base.trim_end_matches('/'))
 }
 
-pub fn releases_url(owner: &str, repo: &str) -> String {
-    format!("https://api.github.com/repos/{owner}/{repo}/releases/latest")
+/// One asset, behind a redirect to the release that carries it.
+pub fn download_url(base: &str, tag: &str, asset: &str) -> String {
+    format!(
+        "{}/releases/download/{tag}/{asset}",
+        base.trim_end_matches('/')
+    )
 }
 
-/// The tag and the two URLs this host needs, out of the release JSON.
-pub fn pick(release: &Value, triple: &str) -> Result<Picked, CliError> {
+/// The tag and the two URLs this host needs. The release JSON says which assets
+/// exist; where they are downloaded from is the one address, never a URL the JSON
+/// carries.
+pub fn pick(release: &Value, triple: &str, base: &str) -> Result<Picked, CliError> {
     let tag = tag_of(release)?;
     let asset = asset_name(tag, triple);
     let checksum = checksum_name(tag, triple);
@@ -151,9 +156,8 @@ pub fn pick(release: &Value, triple: &str) -> Result<Picked, CliError> {
             .as_array()
             .into_iter()
             .flatten()
-            .find(|a| a["name"].as_str() == Some(name))
-            .and_then(|a| a["browser_download_url"].as_str())
-            .map(str::to_string)
+            .any(|a| a["name"].as_str() == Some(name))
+            .then(|| download_url(base, tag, name))
             .ok_or_else(|| {
                 CliError::new(
                     "missing_asset",
@@ -359,6 +363,10 @@ mod tests {
             triple("x86_64", "windows").unwrap(),
             "x86_64-pc-windows-msvc"
         );
+        assert_eq!(
+            triple("aarch64", "windows").unwrap(),
+            "aarch64-pc-windows-msvc"
+        );
         let refused = triple("riscv64", "linux").unwrap_err();
         assert_eq!(refused.code, "unknown_target");
         assert!(
@@ -419,12 +427,7 @@ mod tests {
     }
 
     fn release() -> Value {
-        let asset = |name: &str| {
-            json!({
-                "name": name,
-                "browser_download_url": format!("https://example.test/{name}"),
-            })
-        };
+        let asset = |name: &str| json!({ "name": name });
         json!({
             "tag_name": "v1.2.3",
             "assets": [
@@ -438,22 +441,22 @@ mod tests {
 
     #[test]
     fn the_release_answers_with_the_asset_this_host_runs() {
-        let picked = pick(&release(), "x86_64-unknown-linux-musl").unwrap();
+        let picked = pick(&release(), "x86_64-unknown-linux-musl", RELEASE_BASE).unwrap();
         assert_eq!(picked.tag, "v1.2.3");
         assert_eq!(picked.asset, "penv-v1.2.3-x86_64-unknown-linux-musl");
         assert_eq!(
             picked.asset_url,
-            "https://example.test/penv-v1.2.3-x86_64-unknown-linux-musl"
+            "https://penv.cloud/releases/download/v1.2.3/penv-v1.2.3-x86_64-unknown-linux-musl"
         );
         assert_eq!(
             picked.checksum_url,
-            "https://example.test/penv-v1.2.3-x86_64-unknown-linux-musl.sha256"
+            "https://penv.cloud/releases/download/v1.2.3/penv-v1.2.3-x86_64-unknown-linux-musl.sha256"
         );
     }
 
     #[test]
     fn a_release_missing_this_hosts_asset_is_named_rather_than_guessed() {
-        let refused = pick(&release(), "aarch64-apple-darwin").unwrap_err();
+        let refused = pick(&release(), "aarch64-apple-darwin", RELEASE_BASE).unwrap_err();
         assert_eq!(refused.code, "missing_asset");
         assert!(refused.message.contains(".sha256"), "{refused:?}");
     }
@@ -533,6 +536,26 @@ mod tests {
                 .map(|(_, command)| command),
             Some("scoop update penv")
         );
+        assert_eq!(
+            manager(Path::new(
+                "/usr/local/lib/node_modules/@penvhq/cli-linux-x64/bin/penv"
+            )),
+            Some(("npm", "npm i -g @penvhq/cli"))
+        );
+        assert_eq!(
+            manager(Path::new(
+                "/opt/homebrew/lib/node_modules/@penvhq/cli-darwin-arm64/bin/penv"
+            ))
+            .map(|(name, _)| name),
+            Some("npm")
+        );
+        assert_eq!(
+            manager(Path::new(
+                r"C:\Users\dev\AppData\Roaming\npm\node_modules\@penvhq\cli-win32-x64\bin\penv.exe"
+            ))
+            .map(|(name, _)| name),
+            Some("npm")
+        );
         assert_eq!(manager(Path::new("/usr/local/bin/penv")), None);
         assert_eq!(manager(Path::new(r"C:\tools\penv.exe")), None);
     }
@@ -558,19 +581,18 @@ mod tests {
     }
 
     #[test]
-    fn the_repository_field_names_the_owner_and_the_repo() {
+    fn every_url_the_upgrade_reads_hangs_off_the_one_address() {
         assert_eq!(
-            repo_slug("https://github.com/Itzfeminisce/penvhq"),
-            Some(("Itzfeminisce", "penvhq"))
+            latest_url(RELEASE_BASE),
+            "https://penv.cloud/releases/latest"
         );
         assert_eq!(
-            repo_slug("git@github.com:Itzfeminisce/penvhq.git"),
-            Some(("Itzfeminisce", "penvhq"))
-        );
-        assert_eq!(repo_slug("https://example.test/penv"), None);
-        assert_eq!(
-            repo_slug(env!("CARGO_PKG_REPOSITORY")),
-            Some(("Itzfeminisce", "penvhq"))
+            download_url(
+                "https://penv.test/",
+                "v1.2.3",
+                "penv-v1.2.3-x86_64-apple-darwin"
+            ),
+            "https://penv.test/releases/download/v1.2.3/penv-v1.2.3-x86_64-apple-darwin"
         );
     }
 

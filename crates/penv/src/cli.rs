@@ -185,7 +185,7 @@ pub enum Command {
         command: MachineCommand,
     },
 
-    /// Replace this binary from the latest GitHub release
+    /// Replace this binary from the latest release
     Upgrade {
         /// Report what the release carries instead of replacing anything
         #[arg(long)]

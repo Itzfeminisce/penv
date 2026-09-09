@@ -37,7 +37,7 @@ set edit:completion:arg-completer[penv] = {|@words|
             cand 'guard' 'Write the harness rules that keep agents out of .env'
             cand 'reveal' 'Print one value after console approval'
             cand 'machine' 'Machine identities'
-            cand 'upgrade' 'Replace this binary from the latest GitHub release'
+            cand 'upgrade' 'Replace this binary from the latest release'
             cand 'completions' 'Print the shell completion script'
             cand 'hook' 'Run as a harness hook; a payload it cannot read is refused'
             cand 'schema' 'Print the schema as JSON'

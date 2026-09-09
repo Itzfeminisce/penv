@@ -61,7 +61,7 @@ Register-ArgumentCompleter -Native -CommandName 'penv', 'penv.exe' -ScriptBlock 
             [CompletionResult]::new('guard', 'guard', [CompletionResultType]::ParameterValue, 'Write the harness rules that keep agents out of .env')
             [CompletionResult]::new('reveal', 'reveal', [CompletionResultType]::ParameterValue, 'Print one value after console approval')
             [CompletionResult]::new('machine', 'machine', [CompletionResultType]::ParameterValue, 'Machine identities')
-            [CompletionResult]::new('upgrade', 'upgrade', [CompletionResultType]::ParameterValue, 'Replace this binary from the latest GitHub release')
+            [CompletionResult]::new('upgrade', 'upgrade', [CompletionResultType]::ParameterValue, 'Replace this binary from the latest release')
             [CompletionResult]::new('completions', 'completions', [CompletionResultType]::ParameterValue, 'Print the shell completion script')
             [CompletionResult]::new('hook', 'hook', [CompletionResultType]::ParameterValue, 'Run as a harness hook; a payload it cannot read is refused')
             [CompletionResult]::new('schema', 'schema', [CompletionResultType]::ParameterValue, 'Print the schema as JSON')

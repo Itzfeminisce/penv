@@ -145,3 +145,6 @@ vite.config.ts.timestamp-*
 
 # Rust
 target/
+
+# npm packages the release generates
+npm/build/

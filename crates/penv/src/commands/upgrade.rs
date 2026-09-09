@@ -6,30 +6,22 @@ use crate::error::CliError;
 use crate::files::show;
 use crate::output::{Output, Report};
 use crate::upgrade::{
-    Swap, digest_in, is_newer, manager, pick, releases_url, replace, repo_slug, resets_in, tag_of,
+    RELEASE_BASE, Swap, digest_in, is_newer, latest_url, manager, pick, replace, resets_in, tag_of,
     triple,
 };
 use penv_cloud::fetch;
 
-const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const INSTALL: &str = "Install from https://penv.cloud/install.";
 
-/// The GitHub release is the source of truth: the raw binary for this target,
+/// The published release is the source of truth: the raw binary for this target,
 /// its digest, and then the swap.
 pub fn run(out: &Output, check: bool) -> Result<Report, CliError> {
     let style = out.style();
-    let (owner, repo) = repo_slug(REPOSITORY).ok_or_else(|| {
-        CliError::new(
-            "no_repository",
-            format!("{REPOSITORY} is not a GitHub repository, so there is no release to read."),
-            INSTALL,
-        )
-    })?;
     // The host is answered before the network is, so --check refuses here too.
     let target = triple(std::env::consts::ARCH, std::env::consts::OS)?;
 
-    let url = releases_url(owner, repo);
+    let url = latest_url(RELEASE_BASE);
     let body = get(&url, "application/vnd.github+json")?;
     let release: serde_json::Value =
         serde_json::from_slice(&body).map_err(|e| unreadable(&url, &e.to_string()))?;
@@ -68,7 +60,7 @@ pub fn run(out: &Output, check: bool) -> Result<Report, CliError> {
         ));
     }
 
-    let picked = pick(&release, target)?;
+    let picked = pick(&release, target, RELEASE_BASE)?;
     let binary = get(&picked.asset_url, "application/octet-stream")?;
     let sums = String::from_utf8_lossy(&get(&picked.checksum_url, "text/plain")?).into_owned();
     let expected = digest_in(&sums, &picked.asset).ok_or_else(|| {
@@ -166,8 +158,8 @@ fn get(url: &str, accept: &str) -> Result<Vec<u8>, CliError> {
     }
 }
 
-/// GitHub allows 60 unauthenticated requests an hour, and says on the response
-/// when the next hour starts.
+/// The release host caps unauthenticated requests by the hour, and says on the
+/// response when the next hour starts.
 fn rate_limited(url: &str, response: &fetch::Response) -> CliError {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -181,7 +173,7 @@ fn rate_limited(url: &str, response: &fetch::Response) -> CliError {
     CliError::new(
         "rate_limited",
         format!(
-            "{url} refused: GitHub allows 60 unauthenticated requests an hour, and this host has spent them."
+            "{url} refused: the release host allows a limited number of unauthenticated requests an hour, and this host has spent them."
         ),
         format!("Try again {when}, or install from https://penv.cloud/install."),
     )
@@ -217,13 +209,17 @@ mod tests {
             .unwrap()
             .as_secs()
             + 600;
-        let refused = rate_limited("https://api.github.test/x", &answered(&[]));
+        let refused = rate_limited("https://releases.test/x", &answered(&[]));
         assert_eq!(refused.code, "rate_limited");
-        assert!(refused.message.contains("60"), "{refused:?}");
+        assert!(
+            refused.message.contains("unauthenticated requests an hour"),
+            "{refused:?}"
+        );
+        assert!(!refused.message.contains("GitHub"), "{refused:?}");
         assert!(refused.fix.contains("within the hour"), "{refused:?}");
 
         let timed = rate_limited(
-            "https://api.github.test/x",
+            "https://releases.test/x",
             &answered(&[("x-ratelimit-reset", &soon.to_string())]),
         );
         assert!(timed.fix.contains("in 10m"), "{timed:?}");

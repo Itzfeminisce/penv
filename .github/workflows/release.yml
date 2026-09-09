@@ -8,7 +8,31 @@ permissions:
   contents: write
 
 jobs:
+  # The release is created once here, so the six build jobs only ever upload into it.
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag is the workspace version
+        run: |
+          set -euo pipefail
+          tagged=${GITHUB_REF_NAME#v}
+          declared=$(sed -n '/^\[workspace\.package\]/,/^\[/p' Cargo.toml |
+            sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+          if [ "$tagged" != "$declared" ]; then
+            echo "::error::tag $GITHUB_REF_NAME is version $tagged and Cargo.toml [workspace.package] says $declared. Bump one of them and tag again."
+            exit 1
+          fi
+      # The installers are assets too, so penv.cloud serves /install from the release
+      # rather than from whatever main happens to hold.
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            install.sh
+            install.ps1
+
   build:
+    needs: release
     strategy:
       matrix:
         include:
@@ -17,6 +41,7 @@ jobs:
           - { os: macos-latest,   target: x86_64-apple-darwin }
           - { os: macos-latest,   target: aarch64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -48,3 +73,58 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+      # The raw binaries again, this time for the npm job to pack.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/penv-${{ github.ref_name }}-${{ matrix.target }}${{ contains(matrix.target, 'windows') && '.exe' || '' }}
+          if-no-files-found: error
+
+  npm:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Provenance is signed with this workflow's OIDC token.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: binary-*
+          merge-multiple: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: node --test npm/launcher.test.mjs
+      - run: node npm/pack.mjs --version ${{ github.ref_name }} --binaries dist --out npm/build
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "no NPM_TOKEN secret, so the packages were built and nothing was published"
+            exit 0
+          fi
+          version=${GITHUB_REF_NAME#v}
+          # A prerelease never becomes what npm i -g installs by default.
+          case "$version" in
+            *-*) dist_tag=next ;;
+            *) dist_tag=latest ;;
+          esac
+          publish() {
+            name=$(node -p "require('$PWD/$1/package.json').name")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is on the registry already, so it was skipped"
+              return
+            fi
+            npm publish "$1" --provenance --access public --tag "$dist_tag"
+          }
+          # The platform packages first: the launcher's optionalDependencies pin this version.
+          for package in npm/build/cli-*; do
+            publish "$package"
+          done
+          publish npm/build/cli
