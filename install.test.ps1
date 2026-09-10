@@ -124,6 +124,7 @@ try {
     Check 'the binary lands where -InstallDir says' `
     (Get-Content (Join-Path $into 'penv.exe') -Raw -ErrorAction SilentlyContinue) 'not a real binary'
     Mentions 'the install location is printed' $output (Join-Path $into 'penv.exe')
+    Mentions 'the signature it cannot check is called out' $output 'signature not checked'
 
     # No -Version, so the tag comes from the release the base answers with.
     $into = Join-Path $work 'unpinned-bin'
@@ -159,6 +160,15 @@ try {
     Install 'good' $into @('-Nonsense')
     Check 'an unknown flag refuses' ($code -ne 0) $true
     Mentions 'the refusal names the flag' $output 'not a flag this installer takes'
+
+    # .NET has no Ed25519, so a signature beside the checksum file changes nothing
+    # either way: the release installs on its digest and says the signature went unread.
+    Set-Content -Path (Join-Path (Assets 'good') "$sums.sig") -Encoding Ascii -NoNewline `
+        -Value 'bm90IGEgc2lnbmF0dXJlIGF0IGFsbA=='
+    $into = Join-Path $work 'signed-bin'
+    Install 'good' $into @()
+    Check 'a release carrying a signature installs on the digest alone' $code 0
+    Mentions 'and still says the signature went unchecked' $output 'signature not checked'
 
     # Piped in, there are no flags to pass, so the same four settings arrive as environment variables.
     $into = Join-Path $work 'piped-bin'

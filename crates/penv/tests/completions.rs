@@ -61,6 +61,14 @@ fn every_shell_renders_its_snapshot() {
 /// `-n` parses without running, over stdin, so no path has to survive the trip
 /// into a shell that may not spell this filesystem the same way.
 fn parses(shell: &str, script: &str) {
+    // Windows ships a `bash` that only launches WSL and fails without a distro.
+    let answers = Command::new(shell)
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty());
+    if !answers {
+        return;
+    }
     let spawned = Command::new(shell)
         .arg("-n")
         .stdin(Stdio::piped())

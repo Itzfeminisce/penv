@@ -1,0 +1,11 @@
+[package]
+name = "penv-release"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Release signing for penv. A development tool: never published, never shipped."
+publish = false
+
+[dependencies]
+penv-cloud.workspace = true

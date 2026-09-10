@@ -8,12 +8,13 @@ pub mod credential;
 pub mod error;
 pub mod fetch;
 pub mod keychain;
+pub mod signature;
 
 pub use api::{
-    AGENT_HEADER, Address, Api, Bearer, Challenge, CloudKey, DEFAULT_BASE_URL, DevicePoll,
-    DeviceStart, Enrolment, EnvBody, Fetched, Freshness, Grant, KeypairGrant, Org, Project,
-    PutResult, SESSION_HEADER, SetResult, SignedRequest, Stamp, URL_VAR, UnsetResult, User,
-    encode_segment, host_name, without_nulls,
+    AGENT_HEADER, Address, Api, Approval, Bearer, Challenge, CloudKey, DEFAULT_BASE_URL,
+    DevicePoll, DeviceStart, Enrolment, EnvBody, Fetched, Freshness, Grant, KeypairGrant, Org,
+    Project, PutResult, Requested, Revealed, SESSION_HEADER, SetResult, SignedRequest, Stamp,
+    URL_VAR, UnsetResult, User, encode_segment, host_name, without_nulls,
 };
 pub use cache::{Cache, Entry, Resolved, Source, cache_dir, fetch, ttl_for};
 pub use clock::{Clock, Fixed, SystemClock, epoch_from_rfc3339};

@@ -16,7 +16,7 @@ _penv() {
         'check:Report schema problems and missing values'
         'gen:Write the typed file for a language target'
         'guard:Write the harness rules that keep agents out of .env'
-        'reveal:Print one value after console approval'
+        'reveal:Print one value; an agent session needs a person'\''s approval'
         'machine:Machine identities'
         'upgrade:Replace this binary from the latest release'
         'completions:Print the shell completion script'
@@ -48,7 +48,7 @@ _penv() {
                 check) _arguments '--json[Emit JSON on stdout, whatever stdout is attached to]' '--format[Pick the output format: json or text]:value:(json text)' '--agent[Treat this session as an agent: JSON out, values masked]' ;;
                 gen) _arguments '--out[Write here instead, relative to the repository root]:value:' '--check[Compare with what is on disk instead of writing]' '--json[Emit JSON on stdout, whatever stdout is attached to]' '--format[Pick the output format: json or text]:value:(json text)' '--agent[Treat this session as an agent: JSON out, values masked]' ;;
                 guard) _arguments '--all[Write every harness penv knows, installed or not]' '--check[Report coverage instead of writing]' '--json[Emit JSON on stdout, whatever stdout is attached to]' '--format[Pick the output format: json or text]:value:(json text)' '--agent[Treat this session as an agent: JSON out, values masked]' ;;
-                reveal) _arguments '--env[The environment to read]:value:' '--json[Emit JSON on stdout, whatever stdout is attached to]' '--format[Pick the output format: json or text]:value:(json text)' '--agent[Treat this session as an agent: JSON out, values masked]' ;;
+                reveal) _arguments '--env[The environment to read]:value:' '--approval[Print the value a person approved under this id]:value:' '--json[Emit JSON on stdout, whatever stdout is attached to]' '--format[Pick the output format: json or text]:value:(json text)' '--agent[Treat this session as an agent: JSON out, values masked]' ;;
                 machine) _penv_machine ;;
                 upgrade) _arguments '--check[Report what the release carries instead of replacing anything]' '--json[Emit JSON on stdout, whatever stdout is attached to]' '--format[Pick the output format: json or text]:value:(json text)' '--agent[Treat this session as an agent: JSON out, values masked]' ;;
                 completions) _arguments '--json[Emit JSON on stdout, whatever stdout is attached to]' '--format[Pick the output format: json or text]:value:(json text)' '--agent[Treat this session as an agent: JSON out, values masked]' '1: :(bash zsh fish powershell elvish)' ;;

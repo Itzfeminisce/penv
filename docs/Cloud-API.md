@@ -83,6 +83,25 @@ DELETE /api/v1/envs/{org}/{project}/{environment}/keys/{path...}/{name}   unset
 
 Every address and key segment is percent-encoded by the client; environment names are free-form. The per-key schema is stored in `parameters.meta` as the same JSON object the CLI emits for that key in `penv schema --json`, minus `name`: `type {name, raw, members, constraints}`, `required`, `sensitive`, `default`, `description`, `example`, `docs`, `since`, `deprecated` (a string note), `rotate`, `dynamic` (boolean), `dynamicFrom`. The client omits absent fields; the server treats `null` as absent. Anything else is `400 schema_invalid`. Writes to a dynamic key answer `409 dynamic`. The console renders and edits it. `must_encrypt` follows `sensitive`.
 
+## Reveal approvals
+
+An agent session may ask for a value; only a person may release one. This is phase 2b, and it exists.
+
+```
+POST /api/v1/approvals            bearer: the user credential (pcu_), agent session headers as on every request
+  body { org, project, environment, key, device }
+  201 { id, url, expiresAt }      requires secret:reveal for the caller; 10 minute expiry
+  409 { error: "approval_pending", id, url } when an unexpired request for the same key and session exists
+GET  /api/v1/approvals/{id}       200 { id, status: "pending"|"approved"|"denied"|"expired"|"redeemed", key, url, expiresAt }
+POST /api/v1/approvals/{id}/redeem
+  200 { key, value }              once; status becomes "redeemed"; audited as secret.reveal with the approver, the agent harness and session id
+  409 { error: "approval_pending" | "approval_denied" | "approval_expired" | "approval_redeemed" }
+```
+
+`device` is the machine name the console page shows. The harness and the session are not body members: they reach the row from the `X-Penv-Agent` and `X-Penv-Session` headers the CLI stamps on every request, and the server reads them there. The 409 reuse answer carries the id and the url and no `expiresAt`, so the CLI passes none on.
+
+The CLI side: `penv reveal KEY` under an agent creates the request and exits 4 with `{ "error": "approval_required", "message", "approval": id, "url", "expiresAt", "fix": "A person approves at <url>, then run penv reveal KEY --approval <id>." }`; a 409 answers in the same shape with no `expiresAt` and a message saying the key already has an open approval. `penv reveal KEY --approval <id>` reads `GET /approvals/{id}` first and refuses with its own `approval_mismatch` at exit 4, fix `Run penv reveal KEY for its own approval.`, when that approval names another key, so an id is never spent on a key nobody released. Otherwise it redeems: the value on 200, and on a 409 either exit 4 again (`approval_pending`, whose page and expiry come from that first read; `approval_expired` and `approval_redeemed`, whose fix is a fresh `penv reveal KEY`) or exit 2 (`approval_denied`). For a person at a terminal nothing changes: `reveal` is a plain read gated by `secret:reveal`, and `--approval` redeems an id they were handed the same way.
+
 ## Projects
 
 ```
@@ -101,15 +120,11 @@ Slugs are derived from names server-side; an ambiguous address is refused, never
 | 401 | `expired` (say so: run `penv login` again), `unauthorized` |
 | 403 | `forbidden`, `denied` |
 | 404 | `not_found` |
-| 409 | `dynamic`, `cloned`, `quota_exceeded`, `ambiguous` |
+| 409 | `dynamic`, `cloned`, `quota_exceeded`, `ambiguous`, `approval_pending`, `approval_denied`, `approval_expired`, `approval_redeemed` |
 | 429 | `rate_limited`, `slow_down`, both with `retry-after` seconds |
 | 503 | `unavailable`, retry once |
 | other 5xx | one retry after one second, then exit 1 naming the status |
 
 ## Rate limits and audit
 
-As today: IP ceiling, then per-principal per-op plan limits. A user credential shares the identity bucket keyed by `principalId`. Every request may carry `X-Penv-Agent: <name>` and `X-Penv-Session: <id>` from the CLI's agent detection; every route that writes an audit row, including orgs, projects and the exchanges, stamps both into the row's metadata, truncated to 128 characters each and treated as data, so the console can answer "what did the agent session touch".
-
-## Out of scope for phase 2
-
-Console approval for `reveal` under an agent session (the exit-4 contract) is phase 2b. In phase 2, `reveal` under an agent session is refused outright by the CLI, and for a person it is a plain read gated by `secret:reveal`.
+As today: IP ceiling, then per-principal per-op plan limits. A user credential shares the identity bucket keyed by `principalId`. Every request may carry `X-Penv-Agent: <name>` and `X-Penv-Session: <id>` from the CLI's agent detection; every route that writes an audit row, including orgs, projects and the exchanges, stamps both into the row's metadata, truncated to 128 characters each and treated as data, so the console can answer "what did the agent session touch". An approval is three such rows: the request, the console's approve or deny, and the redemption, whose `secret.reveal` row names the approver beside the session that asked.

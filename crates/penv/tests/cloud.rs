@@ -19,6 +19,10 @@ const ENVS: &str = "/api/v1/envs/acme/api-gateway/development";
 /// The slug the server derives for this directory. It is not the directory name.
 const SLUG: &str = "api-gateway-2";
 const CREATED_ENVS: &str = "/api/v1/envs/acme/api-gateway-2/development";
+const APPROVALS: &str = "/api/v1/approvals";
+const APPROVAL: &str = "apr_1";
+const APPROVAL_URL: &str = "https://penv.cloud/approvals/apr_1";
+const EXPIRES: &str = "2026-09-09T12:10:00Z";
 
 const KEYS: &str = "\
 # @type=string(startsWith=sk_)
@@ -156,6 +160,27 @@ fn stderr(output: &Output) -> String {
 
 fn json_of(text: &str) -> Value {
     serde_json::from_str(text).unwrap_or_else(|e| panic!("not JSON ({e}): {text}"))
+}
+
+fn approval_body() -> String {
+    json!({ "id": APPROVAL, "url": APPROVAL_URL, "expiresAt": EXPIRES }).to_string()
+}
+
+fn status_path() -> String {
+    format!("{APPROVALS}/{APPROVAL}")
+}
+
+fn redeem_path() -> String {
+    format!("{APPROVALS}/{APPROVAL}/redeem")
+}
+
+/// What the status route answers for an approval waiting on a person.
+fn status_body(key: &str, status: &str) -> String {
+    json!({
+        "id": APPROVAL, "status": status, "key": key,
+        "url": APPROVAL_URL, "expiresAt": EXPIRES,
+    })
+    .to_string()
 }
 
 fn values_body() -> String {
@@ -370,16 +395,319 @@ fn unset_removes_the_value_and_keeps_the_block() {
 // --- reveal -----------------------------------------------------------------
 
 #[test]
-fn reveal_is_refused_in_an_agent_session() {
+fn reveal_under_an_agent_asks_for_an_approval_and_exits_four() {
     let mock = Mock::new();
     mock.on("GET", ENVS, 200, &values_body());
+    mock.on("POST", APPROVALS, 201, &approval_body());
+    let workspace = Workspace::new(&[(".env.schema", &cloud_schema())]);
+
+    let output = workspace
+        .command(&mock)
+        .env("CLAUDECODE", "1")
+        .env("CLAUDE_CODE_SESSION_ID", "sess-9")
+        .args(["reveal", "STRIPE_SECRET_KEY"])
+        .output()
+        .expect("penv runs");
+
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    let error = json_of(&stderr(&output));
+    assert_eq!(error["error"], "approval_required");
+    assert_eq!(error["approval"], APPROVAL);
+    assert_eq!(error["url"], APPROVAL_URL);
+    assert_eq!(error["expiresAt"], EXPIRES);
+    assert!(
+        error["fix"]
+            .as_str()
+            .unwrap()
+            .contains("penv reveal STRIPE_SECRET_KEY --approval apr_1"),
+        "{error}"
+    );
+    assert_eq!(stdout(&output), "", "an exit 4 prints nothing at all");
+    assert!(
+        mock.hits("GET", ENVS).is_empty(),
+        "no value is read before a person approves"
+    );
+
+    let asked = mock.last("POST", APPROVALS);
+    let body = asked.json();
+    assert_eq!(body["org"], "acme");
+    assert_eq!(body["project"], PROJECT);
+    assert_eq!(body["environment"], "development");
+    assert_eq!(body["key"], "STRIPE_SECRET_KEY");
+    assert!(
+        body.get("harness").is_none() && body.get("session").is_none(),
+        "the harness and the session are headers, not body members: {body}"
+    );
+    assert!(
+        body["device"].as_str().is_some_and(|name| !name.is_empty()),
+        "the console page names no machine: {body}"
+    );
+    assert_eq!(asked.header("x-penv-agent"), Some("claude-code"));
+    assert_eq!(asked.header("x-penv-session"), Some("sess-9"));
+}
+
+#[test]
+fn a_second_ask_for_the_same_key_reuses_the_request_already_open() {
+    let mock = Mock::new();
+    mock.on(
+        "POST",
+        APPROVALS,
+        409,
+        &json!({ "error": "approval_pending", "id": APPROVAL, "url": APPROVAL_URL }).to_string(),
+    );
     let workspace = Workspace::new(&[(".env.schema", &cloud_schema())]);
     let output = workspace.run(&mock, &["--agent", "reveal", "STRIPE_SECRET_KEY"]);
 
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(json_of(&stderr(&output))["error"], "agent_session");
-    assert!(!stdout(&output).contains(SECRET));
-    assert!(mock.hits("GET", ENVS).is_empty(), "it never asked");
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    let error = json_of(&stderr(&output));
+    assert_eq!(error["error"], "approval_required");
+    assert_eq!(error["approval"], APPROVAL);
+    assert_eq!(error["url"], APPROVAL_URL);
+    // The reuse answer carries no expiry, so nothing invents one.
+    assert!(error.get("expiresAt").is_none(), "{error}");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("already has an open approval"),
+        "a reused request reads as one: {error}"
+    );
+    assert!(
+        error["fix"]
+            .as_str()
+            .unwrap()
+            .contains("penv reveal STRIPE_SECRET_KEY --approval apr_1"),
+        "{error}"
+    );
+    assert_eq!(stdout(&output), "", "an exit 4 prints nothing at all");
+}
+
+#[test]
+fn an_approved_request_prints_the_value_once() {
+    let mock = Mock::new();
+    mock.on(
+        "GET",
+        &status_path(),
+        200,
+        &status_body("STRIPE_SECRET_KEY", "approved"),
+    );
+    mock.on(
+        "POST",
+        &redeem_path(),
+        200,
+        &json!({ "key": "STRIPE_SECRET_KEY", "value": SECRET }).to_string(),
+    );
+    let workspace = Workspace::new(&[(".env.schema", &cloud_schema())]);
+    let output = workspace
+        .command(&mock)
+        .env("CLAUDECODE", "1")
+        .env("CLAUDE_CODE_SESSION_ID", "sess-9")
+        .args(["reveal", "STRIPE_SECRET_KEY", "--approval", APPROVAL])
+        .output()
+        .expect("penv runs");
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        json_of(&stdout(&output)),
+        json!({ "key": "STRIPE_SECRET_KEY", "value": SECRET })
+    );
+    assert!(
+        mock.hits("GET", ENVS).is_empty(),
+        "the value comes from the redemption, not from the environment"
+    );
+
+    // Both routes are audit rows, so both carry who asked.
+    for asked in [
+        mock.last("GET", &status_path()),
+        mock.last("POST", &redeem_path()),
+    ] {
+        assert_eq!(asked.header("x-penv-agent"), Some("claude-code"));
+        assert_eq!(asked.header("x-penv-session"), Some("sess-9"));
+    }
+}
+
+/// A person may hold an approval too, and redeeming one is the same command.
+#[test]
+fn a_person_at_a_terminal_redeems_an_approval_they_were_handed() {
+    let mock = Mock::new();
+    mock.on(
+        "GET",
+        &status_path(),
+        200,
+        &status_body("STRIPE_SECRET_KEY", "approved"),
+    );
+    mock.on(
+        "POST",
+        &redeem_path(),
+        200,
+        &json!({ "key": "STRIPE_SECRET_KEY", "value": SECRET }).to_string(),
+    );
+    let workspace = Workspace::new(&[(".env.schema", &cloud_schema())]);
+    let output = workspace.run(
+        &mock,
+        &[
+            "--format",
+            "text",
+            "reveal",
+            "STRIPE_SECRET_KEY",
+            "--approval",
+            APPROVAL,
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output).trim_end(), SECRET);
+    let asked = mock.last("GET", &status_path());
+    assert_eq!(asked.header("x-penv-agent"), None, "nobody is driving");
+    assert_eq!(asked.header("x-penv-session"), None);
+}
+
+/// An approval names one key. Redeeming it for another would print a value
+/// nobody released, so it is refused before the id is spent.
+#[test]
+fn an_approval_for_another_key_is_refused_rather_than_spent() {
+    let mock = Mock::new();
+    mock.on(
+        "GET",
+        &status_path(),
+        200,
+        &status_body("DATABASE_URL", "approved"),
+    );
+    mock.on(
+        "POST",
+        &redeem_path(),
+        200,
+        &json!({ "key": "DATABASE_URL", "value": SECRET }).to_string(),
+    );
+    let workspace = Workspace::new(&[(".env.schema", &cloud_schema())]);
+    let output = workspace.run(
+        &mock,
+        &[
+            "--agent",
+            "reveal",
+            "STRIPE_SECRET_KEY",
+            "--approval",
+            APPROVAL,
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    let error = json_of(&stderr(&output));
+    assert_eq!(error["error"], "approval_mismatch");
+    assert_eq!(error["approval"], APPROVAL);
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("is for DATABASE_URL, not STRIPE_SECRET_KEY"),
+        "{error}"
+    );
+    assert_eq!(
+        error["fix"], "Run penv reveal STRIPE_SECRET_KEY for its own approval.",
+        "{error}"
+    );
+    assert_eq!(stdout(&output), "", "an exit 4 prints nothing at all");
+    assert!(
+        mock.hits("POST", &redeem_path()).is_empty(),
+        "the approval was spent on the wrong key"
+    );
+}
+
+#[test]
+fn a_request_nobody_has_answered_yet_stays_exit_four() {
+    let mock = Mock::new();
+    mock.on(
+        "POST",
+        &redeem_path(),
+        409,
+        &json!({ "error": "approval_pending" }).to_string(),
+    );
+    mock.on(
+        "GET",
+        &status_path(),
+        200,
+        &status_body("STRIPE_SECRET_KEY", "pending"),
+    );
+    let workspace = Workspace::new(&[(".env.schema", &cloud_schema())]);
+    let output = workspace.run(
+        &mock,
+        &[
+            "--agent",
+            "reveal",
+            "STRIPE_SECRET_KEY",
+            "--approval",
+            APPROVAL,
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    let error = json_of(&stderr(&output));
+    assert_eq!(error["error"], "approval_required");
+    assert_eq!(error["approval"], APPROVAL);
+    assert_eq!(error["url"], APPROVAL_URL);
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("not yet approved"),
+        "{error}"
+    );
+    assert_eq!(stdout(&output), "", "an exit 4 prints nothing at all");
+}
+
+#[test]
+fn a_denied_request_is_exit_two_and_an_expired_one_is_asked_again() {
+    let workspace = Workspace::new(&[(".env.schema", &cloud_schema())]);
+
+    let denied = Mock::new();
+    denied.on(
+        "POST",
+        &redeem_path(),
+        409,
+        &json!({ "error": "approval_denied" }).to_string(),
+    );
+    let output = workspace.run(
+        &denied,
+        &[
+            "--agent",
+            "reveal",
+            "STRIPE_SECRET_KEY",
+            "--approval",
+            APPROVAL,
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert_eq!(json_of(&stderr(&output))["error"], "approval_denied");
+    assert_eq!(stdout(&output), "", "a refusal prints nothing at all");
+
+    let expired = Mock::new();
+    expired.on(
+        "POST",
+        &redeem_path(),
+        409,
+        &json!({ "error": "approval_expired" }).to_string(),
+    );
+    let output = workspace.run(
+        &expired,
+        &[
+            "--agent",
+            "reveal",
+            "STRIPE_SECRET_KEY",
+            "--approval",
+            APPROVAL,
+        ],
+    );
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    let error = json_of(&stderr(&output));
+    assert_eq!(error["error"], "approval_expired");
+    assert!(
+        error["fix"]
+            .as_str()
+            .unwrap()
+            .contains("penv reveal STRIPE_SECRET_KEY"),
+        "{error}"
+    );
+    assert_eq!(stdout(&output), "", "an exit 4 prints nothing at all");
 }
 
 #[test]

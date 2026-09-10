@@ -20,6 +20,12 @@ pub const TARGETS: [(&str, &str, &str); 6] = [
     ("aarch64", "windows", "aarch64-pc-windows-msvc"),
 ];
 
+/// The Ed25519 public keys, base64, a release checksum file may be signed with.
+/// Empty until the owner runs `cargo run -p penv-release -- keygen` and pastes
+/// the public half here. A rotation adds the new key, ships a release signed by
+/// the old one carrying both, and drops the old key the release after that.
+pub const PUBLIC_KEYS: &[&str] = &["VRJ90W7uzjrwQKeD6KCGQj1dih6z6/4QVeat0M5qL/0="];
+
 /// One release, narrowed to what this host would install.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Picked {
@@ -28,6 +34,9 @@ pub struct Picked {
     pub asset_url: String,
     pub checksum: String,
     pub checksum_url: String,
+    pub signature: String,
+    /// None when the release lists no signature for its checksum file.
+    pub signature_url: Option<String>,
 }
 
 pub fn triple(arch: &str, os: &str) -> Result<&'static str, CliError> {
@@ -63,6 +72,49 @@ pub fn asset_name(tag: &str, triple: &str) -> String {
 /// Every asset for one target shares the checksum file.
 pub fn checksum_name(tag: &str, triple: &str) -> String {
     format!("penv-{tag}-{triple}.sha256")
+}
+
+/// The signature over that checksum file, which is what a release key signs.
+pub fn signature_name(tag: &str, triple: &str) -> String {
+    format!("{}.sig", checksum_name(tag, triple))
+}
+
+/// A build with no key in [`PUBLIC_KEYS`] cannot tell a penv release from a file
+/// somebody put in its place, so it does not upgrade at all.
+pub fn checked_keys(keys: &[&str]) -> Result<(), CliError> {
+    if keys.is_empty() {
+        return Err(CliError::new(
+            "unsigned_build",
+            "this build carries no release key, so it cannot check who signed a download.",
+            "Install from https://penv.cloud/install; that binary carries the key and upgrades from then on.",
+        ));
+    }
+    Ok(())
+}
+
+/// The signature over the checksum file, against every key this build carries.
+/// Nothing about the digest is read until this holds.
+pub fn checked_signature(
+    keys: &[&str],
+    sums: &[u8],
+    signature: Option<&str>,
+) -> Result<(), CliError> {
+    checked_keys(keys)?;
+    let Some(signature) = signature.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Err(CliError::new(
+            "signature_missing",
+            "the release carries no signature for its checksum file.",
+            "Nothing was replaced. Install from https://penv.cloud/install, and report a release that stays unsigned.",
+        ));
+    };
+    if !penv_cloud::signature::verify_any(keys, sums, signature) {
+        return Err(CliError::new(
+            "signature_invalid",
+            "the checksum file is not signed by a penv release key.",
+            "Nothing was replaced. Install from https://penv.cloud/install, and report it.",
+        ));
+    }
+    Ok(())
 }
 
 /// The digest for one asset out of a `sha256sum` file. The name is matched whole,
@@ -151,27 +203,34 @@ pub fn pick(release: &Value, triple: &str, base: &str) -> Result<Picked, CliErro
     let tag = tag_of(release)?;
     let asset = asset_name(tag, triple);
     let checksum = checksum_name(tag, triple);
-    let url_of = |name: &str| {
+    let signature = signature_name(tag, triple);
+    let listed = |name: &str| {
         release["assets"]
             .as_array()
             .into_iter()
             .flatten()
             .any(|a| a["name"].as_str() == Some(name))
             .then(|| download_url(base, tag, name))
-            .ok_or_else(|| {
-                CliError::new(
-                    "missing_asset",
-                    format!("release {tag} carries no {name}."),
-                    "Install from https://penv.cloud/install until that release is fixed.",
-                )
-            })
+    };
+    let url_of = |name: &str| {
+        listed(name).ok_or_else(|| {
+            CliError::new(
+                "missing_asset",
+                format!("release {tag} carries no {name}."),
+                "Install from https://penv.cloud/install until that release is fixed.",
+            )
+        })
     };
     Ok(Picked {
         tag: tag.to_string(),
         asset_url: url_of(&asset)?,
         checksum_url: url_of(&checksum)?,
+        // An unsigned release is refused where the signature is checked, so this
+        // one is picked up when it is there and named when it is not.
+        signature_url: listed(&signature),
         asset,
         checksum,
+        signature,
     })
 }
 
@@ -389,6 +448,10 @@ mod tests {
             checksum_name("v1.2.3", "x86_64-pc-windows-msvc"),
             "penv-v1.2.3-x86_64-pc-windows-msvc.sha256"
         );
+        assert_eq!(
+            signature_name("v1.2.3", "x86_64-pc-windows-msvc"),
+            "penv-v1.2.3-x86_64-pc-windows-msvc.sha256.sig"
+        );
     }
 
     /// Obviously fake, and still the 64 hex characters a real digest is.
@@ -413,6 +476,42 @@ mod tests {
         );
     }
 
+    /// A checksum file carrying another release's lines answers for that release
+    /// only, so an old digest cannot be replayed against the tag being installed.
+    #[test]
+    fn a_line_for_another_tag_never_answers_for_this_one() {
+        let sums = format!(
+            "{ARCHIVE}  penv-v1.2.4-x86_64-unknown-linux-musl\n\
+             {STAR}  penv-v1.2.3-x86_64-unknown-linux-musl\n"
+        );
+        assert_eq!(
+            digest_in(&sums, "penv-v1.2.3-x86_64-unknown-linux-musl"),
+            Some(STAR)
+        );
+        assert_eq!(
+            digest_in(
+                &format!("{ARCHIVE}  penv-v1.2.4-x86_64-unknown-linux-musl\n"),
+                "penv-v1.2.3-x86_64-unknown-linux-musl"
+            ),
+            None
+        );
+        // A prefix of the asked-for name is not the name either, in either direction.
+        assert_eq!(
+            digest_in(
+                &format!("{ARCHIVE}  penv-v1.2.3-x86_64-unknown-linux-musl.tar.gz\n"),
+                "penv-v1.2.3-x86_64-unknown-linux-musl"
+            ),
+            None
+        );
+        assert_eq!(
+            digest_in(
+                &format!("{ARCHIVE}  penv-v1.2.3-x86_64-unknown-linux-musl\n"),
+                "penv-v1.2.3-x86_64-unknown-linux-musl.exe"
+            ),
+            None
+        );
+    }
+
     #[test]
     fn a_line_that_is_not_a_sha256_names_no_digest() {
         assert_eq!(digest_in("cccc  penv-v1.2.3\n", "penv-v1.2.3"), None);
@@ -434,6 +533,7 @@ mod tests {
                 asset("penv-v1.2.3-x86_64-unknown-linux-musl.tar.gz"),
                 asset("penv-v1.2.3-x86_64-unknown-linux-musl"),
                 asset("penv-v1.2.3-x86_64-unknown-linux-musl.sha256"),
+                asset("penv-v1.2.3-x86_64-unknown-linux-musl.sha256.sig"),
                 asset("penv-v1.2.3-aarch64-apple-darwin"),
             ],
         })
@@ -445,12 +545,104 @@ mod tests {
         assert_eq!(picked.tag, "v1.2.3");
         assert_eq!(picked.asset, "penv-v1.2.3-x86_64-unknown-linux-musl");
         assert_eq!(
+            picked.signature_url.as_deref(),
+            Some(
+                "https://penv.cloud/releases/download/v1.2.3/penv-v1.2.3-x86_64-unknown-linux-musl.sha256.sig"
+            )
+        );
+        assert_eq!(
             picked.asset_url,
             "https://penv.cloud/releases/download/v1.2.3/penv-v1.2.3-x86_64-unknown-linux-musl"
         );
         assert_eq!(
             picked.checksum_url,
             "https://penv.cloud/releases/download/v1.2.3/penv-v1.2.3-x86_64-unknown-linux-musl.sha256"
+        );
+    }
+
+    /// The installer verifies against its own copy of the list, so a key pasted
+    /// into one file and not the other is caught here rather than in a release.
+    #[test]
+    fn the_installer_lists_the_same_keys_as_this_build() {
+        const INSTALLER: &str = include_str!("../../../install.sh");
+        let declared = INSTALLER
+            .lines()
+            .find_map(|line| line.strip_prefix("public_keys="))
+            .expect("install.sh declares public_keys");
+        let listed: Vec<&str> = declared
+            .trim()
+            .trim_matches('"')
+            .split_whitespace()
+            .collect();
+        assert_eq!(
+            listed.as_slice(),
+            PUBLIC_KEYS,
+            "install.sh and PUBLIC_KEYS carry different release keys"
+        );
+    }
+
+    #[test]
+    fn every_key_this_build_ships_is_a_key() {
+        for key in PUBLIC_KEYS {
+            assert!(
+                penv_cloud::signature::is_public_key(key),
+                "{key} is not a base64 Ed25519 public key"
+            );
+        }
+    }
+
+    #[test]
+    fn a_build_carrying_no_key_upgrades_to_nothing() {
+        let refused = checked_keys(&[]).unwrap_err();
+        assert_eq!(refused.code, "unsigned_build");
+        assert!(refused.message.contains("no release key"), "{refused:?}");
+        assert_eq!(
+            checked_signature(&[], b"anything", Some("whatever"))
+                .unwrap_err()
+                .code,
+            "unsigned_build"
+        );
+    }
+
+    #[test]
+    fn only_a_release_key_signature_over_these_bytes_passes() {
+        let sums = b"0000000000000000000000000000000000000000000000000000000000000000  penv-v1.2.3-x86_64-apple-darwin\n";
+        let ours = penv_cloud::signature::generate().unwrap();
+        let retired = penv_cloud::signature::generate().unwrap();
+        let theirs = penv_cloud::signature::generate().unwrap();
+        let signature = penv_cloud::signature::sign(&ours.private, sums).unwrap();
+
+        assert!(checked_signature(&[&ours.public], sums, Some(&signature)).is_ok());
+        // A rotation lists both keys, and the release signed by either one lands.
+        assert!(
+            checked_signature(&[&retired.public, &ours.public], sums, Some(&signature)).is_ok()
+        );
+
+        let missing = checked_signature(&[&ours.public], sums, None).unwrap_err();
+        assert_eq!(missing.code, "signature_missing");
+        assert!(missing.message.contains("no signature"), "{missing:?}");
+
+        assert_eq!(
+            checked_signature(&[&ours.public], sums, Some("   "))
+                .unwrap_err()
+                .code,
+            "signature_missing"
+        );
+        assert_eq!(
+            checked_signature(&[&theirs.public], sums, Some(&signature))
+                .unwrap_err()
+                .code,
+            "signature_invalid"
+        );
+        assert_eq!(
+            checked_signature(
+                &[&ours.public],
+                b"a checksum file nobody signed",
+                Some(&signature)
+            )
+            .unwrap_err()
+            .code,
+            "signature_invalid"
         );
     }
 

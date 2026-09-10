@@ -170,13 +170,16 @@ pub enum Command {
         check: bool,
     },
 
-    /// Print one value after console approval
+    /// Print one value; an agent session needs a person's approval
     Reveal {
         /// The key to reveal
         key: String,
         /// The environment to read
         #[arg(long)]
         env: Option<String>,
+        /// Print the value a person approved under this id
+        #[arg(long, value_name = "ID")]
+        approval: Option<String>,
     },
 
     /// Machine identities

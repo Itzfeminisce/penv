@@ -6,8 +6,8 @@ use crate::error::CliError;
 use crate::files::show;
 use crate::output::{Output, Report};
 use crate::upgrade::{
-    RELEASE_BASE, Swap, digest_in, is_newer, latest_url, manager, pick, replace, resets_in, tag_of,
-    triple,
+    PUBLIC_KEYS, RELEASE_BASE, Swap, checked_keys, checked_signature, digest_in, is_newer,
+    latest_url, manager, pick, replace, resets_in, tag_of, triple,
 };
 use penv_cloud::fetch;
 
@@ -30,6 +30,10 @@ pub fn run(out: &Output, check: bool) -> Result<Report, CliError> {
     let behind = is_newer(tag, VERSION);
 
     if check {
+        // Naming a release to install would be advice this build cannot take.
+        if behind {
+            checked_keys(PUBLIC_KEYS)?;
+        }
         let text = if behind {
             format!(
                 "penv {latest} is out\n{}",
@@ -51,6 +55,8 @@ pub fn run(out: &Output, check: bool) -> Result<Report, CliError> {
         ));
     }
 
+    // The manager owns this file whatever this build could verify, so its advice
+    // comes before the key check that would otherwise send the user nowhere.
     let path = current_exe()?;
     if let Some((name, command)) = manager(&path) {
         return Err(CliError::new(
@@ -59,10 +65,21 @@ pub fn run(out: &Output, check: bool) -> Result<Report, CliError> {
             format!("Run {command}, or install from https://penv.cloud/install elsewhere."),
         ));
     }
+    checked_keys(PUBLIC_KEYS)?;
 
     let picked = pick(&release, target, RELEASE_BASE)?;
     let binary = get(&picked.asset_url, "application/octet-stream")?;
-    let sums = String::from_utf8_lossy(&get(&picked.checksum_url, "text/plain")?).into_owned();
+    let sums = get(&picked.checksum_url, "text/plain")?;
+
+    // The signature stands in front of the digest: an unsigned checksum file says
+    // nothing about the binary it lists.
+    let signature = match &picked.signature_url {
+        Some(url) => Some(String::from_utf8_lossy(&get(url, "text/plain")?).into_owned()),
+        None => None,
+    };
+    checked_signature(PUBLIC_KEYS, &sums, signature.as_deref())?;
+
+    let sums = String::from_utf8_lossy(&sums).into_owned();
     let expected = digest_in(&sums, &picked.asset).ok_or_else(|| {
         CliError::new(
             "no_checksum",
@@ -73,7 +90,6 @@ pub fn run(out: &Output, check: bool) -> Result<Report, CliError> {
             "Install from https://penv.cloud/install until that release is fixed.",
         )
     })?;
-    // signature verification follows once the release signs the checksum file
     if !expected.eq_ignore_ascii_case(&penv_cloud::sha256_hex(&binary)) {
         return Err(CliError::new(
             "checksum_mismatch",
@@ -94,6 +110,7 @@ pub fn run(out: &Output, check: bool) -> Result<Report, CliError> {
             "path": show(&path),
             "asset": picked.asset,
             "digest": "sha256",
+            "signature": "ed25519",
         }),
         format!(
             "{} penv {VERSION} to {latest}\n{}",

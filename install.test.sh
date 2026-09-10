@@ -4,7 +4,10 @@
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-installer=$here/install.sh
+shipped=$here/install.sh
+# The unsigned cases run the installer as it ships with no release key pasted in.
+installer=$(mktemp "${TMPDIR:-/tmp}/penv-install-keyless.XXXXXX")
+sed 's|^public_keys=".*"$|public_keys=""|' "$shipped" >"$installer"
 tag=v9.9.9
 triple=x86_64-unknown-linux-musl
 asset=penv-$tag-$triple
@@ -27,7 +30,7 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/penv-install-test.XXXXXX")
 server=
 cleanup() {
     [ -n "$server" ] && kill "$server" 2>/dev/null
-    rm -rf "$work"
+    rm -rf "$work" "$installer"
 }
 trap cleanup EXIT INT TERM
 
@@ -92,17 +95,21 @@ sys.exit(1)
     exit 1
 }
 
-run() {
-    release=$1
-    shift
+run_with() {
+    script=$1
+    release=$2
+    shift 2
     status=0
     output=$(env PENV_VERSION="$tag" PENV_TARGET="$triple" \
         PENV_RELEASE_BASE="http://127.0.0.1:$port/$release" "$@" \
-        sh "$installer" 2>&1) || status=$?
+        sh "$script" 2>&1) || status=$?
 }
+run() { run_with "$installer" "$@"; }
 
 run good PENV_INSTALL_DIR="$work/bin"
 check "a whole release installs" "$status" 0
+contains "an installer with no release key says the signature went unchecked" "$output" \
+    "signature not checked: this installer carries no release key"
 check "the binary lands where PENV_INSTALL_DIR says" "$(cat "$work/bin/penv" 2>/dev/null)" "$(cat "$(assets good)/$asset")"
 check "the installed binary is executable" "$([ -x "$work/bin/penv" ] && echo yes || echo no)" yes
 contains "the install location is printed" "$output" "$work/bin/penv"
@@ -139,6 +146,75 @@ check "the binary lands from the normalised tag" \
 run good PENV_INSTALL_DIR="$work/slash-bin" PENV_VERSION="$tag/../etc"
 check "a tag holding a slash refuses" "$([ "$status" -ne 0 ] && echo refused || echo installed)" refused
 contains "the refusal says what a tag looks like" "$output" "is not a tag such as v1.2.3"
+
+# The installer's own probe, so a host where it would not verify anyway skips these.
+eval "$(sed -n '/^openssl_verifies()/,/^}/p' "$installer")"
+if ! openssl_verifies || ! openssl genpkey -algorithm ed25519 -out "$work/signer.pem" >/dev/null 2>&1; then
+    echo "skip: openssl 1.1.1 or newer signs the fake releases, and there is none on PATH"
+else
+    openssl genpkey -algorithm ed25519 -out "$work/other.pem" >/dev/null 2>&1
+    # The raw 32 key bytes, which is the shape the installer and the binary list.
+    public=$(openssl pkey -in "$work/signer.pem" -pubout -outform DER | tail -c 32 | openssl base64 -A)
+
+    sign_sums() {
+        openssl pkeyutl -sign -inkey "$1" -rawin -in "$2/$sums" -out "$work/signature.bin"
+        # One base64 line and a newline, which is what penv-release writes.
+        { openssl base64 -A -in "$work/signature.bin"; printf '\n'; } >"$2/$sums.sig"
+    }
+    for name in signed bad-signature; do
+        mkdir -p "$(assets "$name")"
+        cp "$(assets good)/$asset" "$(assets good)/$asset.tar.gz" "$(assets good)/$sums" "$(assets "$name")/"
+        cp "$work/serve/good/releases/latest" "$work/serve/$name/releases/latest"
+    done
+    sign_sums "$work/signer.pem" "$(assets signed)"
+    sign_sums "$work/other.pem" "$(assets bad-signature)"
+
+    # The installer as it ships once the owner has pasted a release key into it.
+    signer=$work/install-signed.sh
+    sed "s|^public_keys=\".*\"\$|public_keys=\"$public\"|" "$shipped" >"$signer"
+    check "the test embedded a key in its copy of the installer" \
+        "$(grep -c "^public_keys=\"$public\"\$" "$signer")" 1
+
+    run_with "$signer" signed PENV_INSTALL_DIR="$work/signed-bin"
+    check "a signed release installs" "$status" 0
+    check "the signed binary lands" "$([ -f "$work/signed-bin/penv" ] && echo yes || echo no)" yes
+    case "$output" in
+        *"signature not checked"*)
+            echo "FAIL a signed release is verified rather than waved through"
+            echo "     got: $output"
+            failures=$((failures + 1))
+            ;;
+        *) echo "ok   a signed release is verified rather than waved through" ;;
+    esac
+
+    # The same key as somebody might paste it, without the = base64 ends on.
+    unpadded=${public%=}
+    check "the release key ends on the padding this case drops" "${#unpadded}" 43
+    bare=$work/install-unpadded.sh
+    sed "s|^public_keys=\".*\"\$|public_keys=\"$unpadded\"|" "$shipped" >"$bare"
+    run_with "$bare" signed PENV_INSTALL_DIR="$work/unpadded-bin"
+    check "a key pasted without its padding still verifies" "$status" 0
+    check "the binary lands under an unpadded key" \
+        "$([ -f "$work/unpadded-bin/penv" ] && echo yes || echo no)" yes
+    case "$output" in
+        *"signature not checked"*)
+            echo "FAIL an unpadded key verifies rather than being waved through"
+            echo "     got: $output"
+            failures=$((failures + 1))
+            ;;
+        *) echo "ok   an unpadded key verifies rather than being waved through" ;;
+    esac
+
+    run_with "$signer" bad-signature PENV_INSTALL_DIR="$work/badsig-bin"
+    check "a signature from another key refuses" "$([ "$status" -ne 0 ] && echo refused || echo installed)" refused
+    contains "the refusal names the key list" "$output" "is not signed by a penv release key"
+    check "nothing is installed after a bad signature" \
+        "$([ -e "$work/badsig-bin/penv" ] && echo installed || echo nothing)" nothing
+
+    run_with "$signer" good PENV_INSTALL_DIR="$work/nosig-bin"
+    check "a release carrying no signature refuses" "$([ "$status" -ne 0 ] && echo refused || echo installed)" refused
+    contains "the refusal says the signature is missing" "$output" ".sig could not be downloaded"
+fi
 
 if [ "$failures" -eq 0 ]; then
     echo "install.sh: all checks passed"

@@ -93,7 +93,16 @@ pub fn dispatch(cli: &Cli, out: &Output, cwd: &Path, env: &Env) -> Result<Report
         Some(Command::Reveal {
             key,
             env: environment,
-        }) => reveal::run(out, cwd, key, environment.as_deref(), env, cli.agent),
+            approval,
+        }) => reveal::run(
+            out,
+            cwd,
+            key,
+            environment.as_deref(),
+            env,
+            cli.agent,
+            approval.as_deref(),
+        ),
         Some(Command::Machine {
             command: MachineCommand::Enroll { secret },
         }) => machine::enroll(out, cwd, secret, env),

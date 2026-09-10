@@ -341,6 +341,45 @@ pub struct Challenge {
     pub nonce: String,
 }
 
+/// One console approval for one `reveal`. `expiresAt` is passed back to the
+/// caller as the server sent it.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Approval {
+    pub id: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<Value>,
+}
+
+/// What asking for an approval answered: a new request, or the one already open
+/// for this key and session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Requested {
+    Created(Approval),
+    Pending(Approval),
+}
+
+/// The one value a redeemed approval carries. `Debug` names the key only.
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+pub struct Revealed {
+    pub key: String,
+    pub value: String,
+}
+
+impl fmt::Debug for Revealed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Revealed")
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A keypair exchange: the credential, and the counter that has to be on disk
 /// before the credential is used.
 #[derive(Debug, Clone)]
@@ -579,6 +618,71 @@ impl Api {
         let url = self.url(&format!("/envs/{}/keys/{}", at.path(), key.key_path()));
         let mut response =
             self.attempt(&url, || self.authed(self.http.delete(&url), bearer).call())?;
+        expect(&mut response, &[StatusCode::OK])?;
+        read_json(&url, &mut response)
+    }
+
+    // --- reveal approvals ----------------------------------------------------
+
+    /// Ask a person to approve one reveal. `device` is what the console page
+    /// shows; the harness and the session reach the audit row as the headers
+    /// every request already carries.
+    pub fn approval_create(
+        &self,
+        bearer: &Bearer,
+        at: &Address,
+        key: &str,
+        device: &str,
+    ) -> Result<Requested> {
+        let url = self.url("/approvals");
+        let body = json!({
+            "org": at.org,
+            "project": at.project,
+            "environment": at.environment,
+            "key": key,
+            "device": device,
+        });
+        let mut response = self.attempt(&url, || {
+            self.authed(self.http.post(&url), bearer).send_json(&body)
+        })?;
+        match response.status().as_u16() {
+            200 | 201 => Ok(Requested::Created(read_json(&url, &mut response)?)),
+            // A 409 carries the request already open for this key and session.
+            409 => {
+                let body: Value = read_json(&url, &mut response)?;
+                let code = body
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("conflict");
+                if code != "approval_pending" {
+                    return Err(ApiError::new(409, code).into());
+                }
+                serde_json::from_value(body)
+                    .map(Requested::Pending)
+                    .map_err(|_| CloudError::Unreadable {
+                        url: url.clone(),
+                        reason: "no approval id in the answer".into(),
+                    })
+            }
+            status => Err(refusal(status, &mut response).into()),
+        }
+    }
+
+    pub fn approval(&self, bearer: &Bearer, id: &str) -> Result<Approval> {
+        let url = self.url(&format!("/approvals/{}", encode_segment(id)));
+        let mut response =
+            self.attempt(&url, || self.authed(self.http.get(&url), bearer).call())?;
+        expect(&mut response, &[StatusCode::OK])?;
+        read_json(&url, &mut response)
+    }
+
+    /// Redeem an approved request, once. A 409 answers with why not, and the
+    /// caller turns that code into the exit code.
+    pub fn approval_redeem(&self, bearer: &Bearer, id: &str) -> Result<Revealed> {
+        let url = self.url(&format!("/approvals/{}/redeem", encode_segment(id)));
+        let mut response = self.attempt(&url, || {
+            self.authed(self.http.post(&url), bearer).send_empty()
+        })?;
         expect(&mut response, &[StatusCode::OK])?;
         read_json(&url, &mut response)
     }
@@ -988,6 +1092,19 @@ mod tests {
         assert_eq!(sent.get("version"), None);
         assert_eq!(sent["name"], "PORT");
         assert_eq!(sent["value"], "3000");
+    }
+
+    #[test]
+    fn a_redeemed_approval_never_prints_the_value_it_carries() {
+        let shown = format!(
+            "{:?}",
+            Revealed {
+                key: "STRIPE_SECRET_KEY".into(),
+                value: "sk_test_FAKE0000".into(),
+            }
+        );
+        assert!(!shown.contains("FAKE"), "{shown}");
+        assert!(shown.contains("STRIPE_SECRET_KEY"), "{shown}");
     }
 
     #[test]

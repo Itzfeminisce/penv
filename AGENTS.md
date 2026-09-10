@@ -22,7 +22,7 @@ Never run `cargo build --release` locally. Release builds run in CI. `.cargo/con
 - **One concept, one name.** No aliases for decorators, flags or commands.
 - **Say only what is true.** Error messages name the key and the fix. The security claim text lives in one place.
 - **Comments:** one short line where the reason is not obvious. No block preambles, no restating the code. Replace a stale comment; never stack a new one on an old one.
-- **Never print a value.** No code path outside `reveal` and `pull` writes a sensitive value to stdout, stderr, a log or a test fixture. Tests use obviously fake values.
+- **Never print a value.** No code path outside `reveal` and `pull` writes a sensitive value to stdout, stderr, a log or a test fixture. Tests use obviously fake values. `penv-release keygen` is the one exception and is not the binary: it is the dev tool that mints the release key, and printing the pair is what it is for.
 
 ## Before proposing a change as done
 

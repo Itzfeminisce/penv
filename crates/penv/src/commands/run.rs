@@ -1,5 +1,5 @@
 use std::io::{IsTerminal, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread::JoinHandle;
 
@@ -11,7 +11,7 @@ use crate::agent::detect_here;
 use crate::commands::cloud;
 use crate::env::Env;
 use crate::error::{CliError, Exit};
-use crate::files::{ENV_FILE, SCHEMA_FILE, find_schema, read_file, show};
+use crate::files::{ENV_FILE, SCHEMA_FILE, find_schema, on_path, read_file, show};
 use crate::output::{Output, Report};
 
 /// The only environment local mode has. The rest live in the cloud.
@@ -231,6 +231,18 @@ fn masking(policy: &Policy, no_mask: bool, agent: bool, interactive: bool) -> (b
     (false, false)
 }
 
+/// A bare name is looked up along PATH with PATHEXT, so `npm` finds `npm.cmd`
+/// on Windows; anything with a separator is used as given.
+fn program(name: &str) -> PathBuf {
+    if name.contains(['/', '\\']) {
+        return PathBuf::from(name);
+    }
+    on_path(name, &[])
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
 /// Inherit the environment, override it with the resolved values, and pipe the
 /// output only when there is something to scrub out of it.
 fn spawn(
@@ -240,7 +252,7 @@ fn spawn(
     secrets: Vec<String>,
 ) -> Result<i32, CliError> {
     let piped = !secrets.is_empty();
-    let mut command = Command::new(&argv[0]);
+    let mut command = Command::new(program(&argv[0]));
     command.args(&argv[1..]);
     command.env("PENV_ENV", environment);
     for (key, value) in values {

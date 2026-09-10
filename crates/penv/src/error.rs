@@ -42,6 +42,9 @@ pub struct CliError {
     pub message: String,
     pub fix: String,
     pub exit: Exit,
+    /// What the caller needs beyond the words, such as the approval id an exit 4
+    /// is replayed with.
+    pub details: Vec<(&'static str, Value)>,
 }
 
 impl CliError {
@@ -51,6 +54,7 @@ impl CliError {
             message: message.into(),
             fix: fix.into(),
             exit: Exit::Error,
+            details: Vec::new(),
         }
     }
 
@@ -59,7 +63,22 @@ impl CliError {
         self
     }
 
+    /// One more member on the JSON. A null is left out, since the contract asks
+    /// for absent fields to be absent.
+    pub fn with(mut self, name: &'static str, value: Value) -> CliError {
+        if !value.is_null() {
+            self.details.push((name, value));
+        }
+        self
+    }
+
     pub fn to_json(&self) -> Value {
-        json!({ "error": self.code, "message": self.message, "fix": self.fix })
+        let mut json = json!({ "error": self.code, "message": self.message, "fix": self.fix });
+        if let Some(object) = json.as_object_mut() {
+            for (name, value) in &self.details {
+                object.insert((*name).to_string(), value.clone());
+            }
+        }
+        json
     }
 }

@@ -1226,6 +1226,13 @@ name = "penv-mask"
 version = "1.0.0-alpha.2"
 
 [[package]]
+name = "penv-release"
+version = "1.0.0-alpha.2"
+dependencies = [
+ "penv-cloud",
+]
+
+[[package]]
 name = "penv-schema"
 version = "1.0.0-alpha.2"
 dependencies = [

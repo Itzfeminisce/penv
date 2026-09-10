@@ -91,6 +91,9 @@
             catch { throw "penv: $download/$name could not be downloaded." }
         }
 
+        # .NET carries no Ed25519, so this installer stops at the digest and says so.
+        Write-Host 'signature not checked: PowerShell has no Ed25519, so this install rests on the sha256 digest' -ForegroundColor DarkGray
+
         # The checksum file covers the archive too, so the raw binary's line is matched whole.
         $pattern = '^([0-9a-fA-F]{64})\s+\*?' + [Regex]::Escape($asset) + '$'
         $line = Get-Content (Join-Path $work $sums) | Where-Object { $_ -match $pattern } | Select-Object -First 1

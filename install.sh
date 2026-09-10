@@ -14,7 +14,12 @@ base=${PENV_RELEASE_BASE:-https://penv.cloud}
 base=${base%/}
 targets="x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc aarch64-pc-windows-msvc"
 
+# The release keys, base64 Ed25519 public keys one per line, that a checksum file
+# may be signed with. Empty until the owner runs: cargo run -p penv-release -- keygen
+public_keys="VRJ90W7uzjrwQKeD6KCGQj1dih6z6/4QVeat0M5qL/0="
+
 say() { printf '%s\n' "$*"; }
+dim() { if [ -t 1 ]; then printf '\033[2m%s\033[0m\n' "$*"; else printf '%s\n' "$*"; fi; }
 die() { printf 'penv: %s\n' "$*" >&2; exit 1; }
 
 if [ "$(id -u 2>/dev/null || echo 1)" = 0 ] && [ "${PENV_ALLOW_ROOT:-}" != 1 ]; then
@@ -69,6 +74,45 @@ else
     die "neither sha256sum nor shasum is on PATH, and the download is verified before it is installed."
 fi
 
+# Ed25519 arrived in OpenSSL 1.1.1, and only OpenSSL itself takes -rawin; the
+# LibreSSL that macOS ships under the same name does not.
+openssl_verifies() {
+    command -v openssl >/dev/null 2>&1 || return 1
+    set -- $(openssl version 2>/dev/null)
+    [ "${1:-}" = OpenSSL ] || return 1
+    version=${2:-}
+    major=${version%%.*}
+    rest=${version#*.}
+    minor=${rest%%.*}
+    patch=${rest#*.}
+    patch=${patch%%[!0-9]*}
+    case "$major$minor" in
+        '' | *[!0-9]*) return 1 ;;
+    esac
+    [ "$major" -gt 1 ] && return 0
+    [ "$major" -eq 1 ] && [ "$minor" -gt 1 ] && return 0
+    [ "$major" -eq 1 ] && [ "$minor" -eq 1 ] && [ "${patch:-0}" -ge 1 ]
+}
+
+# The 12 SPKI header bytes are a multiple of three, so the PEM body is that
+# header's base64 followed by the key's own, unchanged.
+signed_by_a_release_key() {
+    # -A reads the signature as the one long line it is, whatever ended it.
+    tr -d '\r\n \t' <"$2" | openssl base64 -d -A -out "$work/signature.bin" 2>/dev/null || return 1
+    for key in $public_keys; do
+        # 32 raw bytes are 44 base64 characters, so a key pasted without its
+        # trailing = is the same key and gets it back.
+        if [ ${#key} -eq 43 ]; then key=$key=; fi
+        printf -- '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA%s\n-----END PUBLIC KEY-----\n' \
+            "$key" >"$work/key.pem"
+        if openssl pkeyutl -verify -pubin -inkey "$work/key.pem" -rawin \
+            -in "$1" -sigfile "$work/signature.bin" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 cleanup() {
     [ -n "${temp:-}" ] && rm -f "$temp"
     [ -n "${work:-}" ] && rm -rf "$work"
@@ -108,6 +152,19 @@ temp=$dir/.penv.$$
 say "penv $tag for $triple"
 fetch "$download/$asset" "$temp" || die "$download/$asset could not be downloaded."
 fetch "$download/$sums" "$work/$sums" || die "$download/$sums could not be downloaded."
+
+# The signature stands in front of the digest: an unsigned checksum file says
+# nothing about the binary it lists.
+if [ -z "$public_keys" ]; then
+    dim "signature not checked: this installer carries no release key"
+elif ! openssl_verifies; then
+    dim "signature not checked: OpenSSL 1.1.1 or newer verifies it, and this host has none"
+else
+    fetch "$download/$sums.sig" "$work/$sums.sig" ||
+        die "$download/$sums.sig could not be downloaded, and a release is signed. Nothing was installed."
+    signed_by_a_release_key "$work/$sums" "$work/$sums.sig" ||
+        die "$sums is not signed by a penv release key. Nothing was installed."
+fi
 
 # The checksum file covers the archive too, so the raw binary's line is matched whole.
 expected=$(sed -n "s/^\([0-9a-fA-F]\{64\}\)[[:space:]][[:space:]]*[*]\{0,1\}$asset\$/\1/p" "$work/$sums" | head -n 1)

@@ -8,7 +8,8 @@ permissions:
   contents: write
 
 jobs:
-  # The release is created once here, so the six build jobs only ever upload into it.
+  # The release is created once here as a draft, so the six build jobs only ever
+  # upload into it and nothing is downloadable until the sign job publishes it.
   release:
     runs-on: ubuntu-latest
     steps:
@@ -27,6 +28,7 @@ jobs:
       # rather than from whatever main happens to hold.
       - uses: softprops/action-gh-release@v2
         with:
+          draft: true
           files: |
             install.sh
             install.ps1
@@ -72,6 +74,7 @@ jobs:
           (cd dist && sum "${assets[@]}" > "$name.sha256")
       - uses: softprops/action-gh-release@v2
         with:
+          draft: true
           files: dist/*
       # The raw binaries again, this time for the npm job to pack.
       - uses: actions/upload-artifact@v4
@@ -80,8 +83,54 @@ jobs:
           path: dist/penv-${{ github.ref_name }}-${{ matrix.target }}${{ contains(matrix.target, 'windows') && '.exe' || '' }}
           if-no-files-found: error
 
-  npm:
+  # Every checksum file is signed with the release key, so an installer and an
+  # upgrade can tell a penv release from a file somebody put in its place.
+  sign:
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: The release key is a secret this repository holds
+        env:
+          PENV_SIGNING_KEY: ${{ secrets.PENV_SIGNING_KEY }}
+        run: |
+          if [ -z "${PENV_SIGNING_KEY:-}" ]; then
+            echo "::error::no PENV_SIGNING_KEY secret, and an unsigned release is never published. Run cargo run -p penv-release -- keygen, put the private line in the PENV_SIGNING_KEY secret, and tag again."
+            exit 1
+          fi
+      # Building is a step of its own, so the key is in the environment of nothing
+      # but the one command that needs it.
+      - name: Build the signing tool
+        run: cargo build -p penv-release --locked
+      - name: The checksum files the release carries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p sums
+          gh release download "$GITHUB_REF_NAME" --pattern '*.sha256' --dir sums
+      - name: Sign every checksum file
+        env:
+          PENV_SIGNING_KEY: ${{ secrets.PENV_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          for file in sums/*.sha256; do
+            ./target/debug/penv-release sign "$file"
+          done
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: sums/*.sig
+      # The signatures are up, so the release becomes one people can download.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+
+  npm:
+    needs: [build, sign]
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -9,7 +9,7 @@ _penv() {
         word="${COMP_WORDS[i]}"
         if [ -n "$skip" ]; then skip=""; continue; fi
         case "$word" in
-            --format|--guards|--output|--env|--org|--value|--out) skip=1; continue ;;
+            --format|--guards|--output|--env|--org|--value|--out|--approval) skip=1; continue ;;
             -*) continue ;;
         esac
         case "${cmd:+$cmd }$word" in
@@ -26,6 +26,7 @@ _penv() {
         --org) COMPREPLY=(); return ;;
         --value) COMPREPLY=(); return ;;
         --out) COMPREPLY=(); return ;;
+        --approval) COMPREPLY=(); return ;;
     esac
 
     words=""
@@ -44,7 +45,7 @@ _penv() {
         check) words="--json --format --agent" ;;
         gen) words="--out --check --json --format --agent" ;;
         guard) words="--all --check --json --format --agent" ;;
-        reveal) words="--env --json --format --agent" ;;
+        reveal) words="--env --approval --json --format --agent" ;;
         machine) words="enroll --json --format --agent" ;;
         "machine enroll") words="--json --format --agent" ;;
         upgrade) words="--check --json --format --agent" ;;

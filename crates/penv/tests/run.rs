@@ -295,3 +295,33 @@ fn agent_and_format_text_is_a_parse_error() {
         stderr(&output)
     );
 }
+
+/// `npm`, `pnpm` and `yarn` are `.cmd` shims on Windows; a bare name has to
+/// find them the way a shell would.
+#[cfg(windows)]
+#[test]
+fn a_bare_name_finds_its_cmd_shim_on_windows() {
+    let workspace = Workspace::new(&[
+        (".env.schema", &local_schema()),
+        (".env", &format!("STRIPE_SECRET_KEY={SECRET}\n")),
+        ("shim.cmd", "@echo shim ran %PORT%\r\n"),
+    ]);
+    let path = format!(
+        "{};{}",
+        workspace.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_penv"))
+        .current_dir(workspace.path())
+        .env("PATH", path)
+        .args(["--agent", "run", "--", "shim"])
+        .output()
+        .expect("penv runs");
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("shim ran 3000"),
+        "{}",
+        stdout(&output)
+    );
+}

@@ -6,7 +6,7 @@ set edit:completion:arg-completer[penv] = {|@words|
     fn cand {|text desc|
         edit:complex-candidate $text &display=$text' '$desc
     }
-    var valued = [&'--format'=['json' 'text'] &'--guards'=[] &'--output'=[] &'--env'=[] &'--org'=[] &'--value'=[] &'--out'=[]]
+    var valued = [&'--format'=['json' 'text'] &'--guards'=[] &'--output'=[] &'--env'=[] &'--org'=[] &'--value'=[] &'--out'=[] &'--approval'=[]]
     var previous = ''
     if (> (count $words) 1) { set previous = $words[-2] }
     var command = 'penv'
@@ -35,7 +35,7 @@ set edit:completion:arg-completer[penv] = {|@words|
             cand 'check' 'Report schema problems and missing values'
             cand 'gen' 'Write the typed file for a language target'
             cand 'guard' 'Write the harness rules that keep agents out of .env'
-            cand 'reveal' 'Print one value after console approval'
+            cand 'reveal' 'Print one value; an agent session needs a person''s approval'
             cand 'machine' 'Machine identities'
             cand 'upgrade' 'Replace this binary from the latest release'
             cand 'completions' 'Print the shell completion script'
@@ -126,6 +126,7 @@ set edit:completion:arg-completer[penv] = {|@words|
         }
         if (eq $command 'penv;reveal') {
             cand '--env' 'The environment to read'
+            cand '--approval' 'Print the value a person approved under this id'
             cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
             cand '--format' 'Pick the output format: json or text'
             cand '--agent' 'Treat this session as an agent: JSON out, values masked'

@@ -12,7 +12,7 @@ function __fish_penv_path --description 'the penv command path typed so far'
         else if test "$token" = '--'
             break
         else if string match -q -- '-*' $token
-            if contains -- $token --format --guards --output --env --org --value --out
+            if contains -- $token --format --guards --output --env --org --value --out --approval
                 set skip 1
             end
         else
@@ -43,7 +43,7 @@ complete -c penv -n '__fish_penv_at ""' -a 'ls' -d 'List keys, types and which o
 complete -c penv -n '__fish_penv_at ""' -a 'check' -d 'Report schema problems and missing values'
 complete -c penv -n '__fish_penv_at ""' -a 'gen' -d 'Write the typed file for a language target'
 complete -c penv -n '__fish_penv_at ""' -a 'guard' -d 'Write the harness rules that keep agents out of .env'
-complete -c penv -n '__fish_penv_at ""' -a 'reveal' -d 'Print one value after console approval'
+complete -c penv -n '__fish_penv_at ""' -a 'reveal' -d 'Print one value; an agent session needs a person'\''s approval'
 complete -c penv -n '__fish_penv_at ""' -a 'machine' -d 'Machine identities'
 complete -c penv -n '__fish_penv_at ""' -a 'upgrade' -d 'Replace this binary from the latest release'
 complete -c penv -n '__fish_penv_at ""' -a 'completions' -d 'Print the shell completion script'
@@ -73,6 +73,7 @@ complete -c penv -n '__fish_penv_at "gen"' -l check -d 'Compare with what is on 
 complete -c penv -n '__fish_penv_at "guard"' -l all -d 'Write every harness penv knows, installed or not'
 complete -c penv -n '__fish_penv_at "guard"' -l check -d 'Report coverage instead of writing'
 complete -c penv -n '__fish_penv_at "reveal"' -l env -r -d 'The environment to read'
+complete -c penv -n '__fish_penv_at "reveal"' -l approval -r -d 'Print the value a person approved under this id'
 complete -c penv -n '__fish_penv_at "machine"' -a 'enroll' -d 'Bind a server keypair from a one-time secret'
 complete -c penv -n '__fish_penv_at "upgrade"' -l check -d 'Report what the release carries instead of replacing anything'
 complete -c penv -n '__fish_penv_at "completions"' -a 'bash zsh fish powershell elvish'
