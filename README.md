@@ -1,9 +1,6 @@
-<h1 align="center">Penv CLI (Official CLI of the penv.cloud platform)</h1>
+<p align="center"><img src=".github/banner.svg" alt="penv" width="1200"></p>
 
-<p align="center">
-  <strong>Your <code>.env</code>, validated, typed, and kept out of your coding agent's reach.</strong><br>
-  One static binary. Works before you have an account. The cloud is the upgrade.
-</p>
+<p align="center">One static binary. Works before you have an account. The cloud is the upgrade.</p>
 
 <p align="center">
   <a href="#install">Install</a> ·
