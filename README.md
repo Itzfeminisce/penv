@@ -11,7 +11,6 @@
   <a href="#with-a-team">With a team</a> ·
   <a href="#coding-agents">Coding agents</a> ·
   <a href="#commands">Commands</a> ·
-  <a href="./docs/Design.md">Design</a>
 </p>
 
 ---
@@ -138,12 +137,5 @@ penv completions elvish >> ~/.config/elvish/rc.elv
 
 The scripts are generated from the same manifest `penv help --json` publishes, so they never fall behind the commands.
 
-## Status
-
-Phase 1, local mode, is complete on the `v1-rust` branch. Phase 2, the cloud commands, is in progress. Phase 3 is distribution. The previous TypeScript CLI on `main` is retired and does not migrate.
-
-## Contributing
-
-Read [AGENTS.md](./AGENTS.md) and [docs/Design.md](./docs/Design.md). Locally run only `cargo check`, `cargo test`, `cargo clippy` and `cargo fmt`; release builds happen in CI.
 
 MIT.
