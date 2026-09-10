@@ -43,7 +43,7 @@ _penv() {
         unset) words="--env --json --format --agent" ;;
         ls) words="--json --format --agent" ;;
         check) words="--json --format --agent" ;;
-        gen) words="--out --check --json --format --agent" ;;
+        gen) words="--out --check --options --json --format --agent" ;;
         guard) words="--all --check --json --format --agent" ;;
         reveal) words="--env --approval --json --format --agent" ;;
         machine) words="enroll --json --format --agent" ;;

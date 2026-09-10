@@ -19,6 +19,6 @@ pub use error::Error;
 pub use folder::{BuiltIn, Roots, Source, Tree};
 pub use import::{Config, extends_of, import_line, join};
 pub use load::{BUILT_IN, available, detected, load};
-pub use remember::{OptionValue, hand_written, override_body};
+pub use remember::{MARK, OptionValue, hand_written, override_body};
 pub use render::render;
-pub use target::{BASE_TYPES, Check, INT_TYPE, Layout, Rule, Suggest, Target};
+pub use target::{BASE_TYPES, Check, INT_TYPE, Knob, Layout, Rule, Suggest, Target, word};

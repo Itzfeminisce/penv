@@ -5,10 +5,20 @@ import = "import { env } from \"{specifier}\""
 paths_from = "tsconfig.json"
 
 [options]
-# Property names in the exported object: the environment key, or its camel form.
 key_case = "upper"
-# Where the values are read from at run time.
 runtime = "node"
+
+[[option]]
+name = "key_case"
+default = "upper"
+values = ["upper", "camel"]
+about = "Property names in the exported object: the environment key, or its camel form."
+
+[[option]]
+name = "runtime"
+default = "node"
+values = ["node", "vite", "deno"]
+about = "The accessor every key is read through: process.env, import.meta.env or Deno.env.get."
 
 [[suggest]]
 option = "runtime"

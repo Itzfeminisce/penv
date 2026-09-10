@@ -156,6 +156,9 @@ pub enum Command {
         /// Compare with what is on disk instead of writing
         #[arg(long)]
         check: bool,
+        /// Show what this target's options change instead of writing
+        #[arg(long, requires = "target", conflicts_with_all = ["out", "check"])]
+        options: bool,
     },
 
     /// Write the harness rules that keep agents out of .env

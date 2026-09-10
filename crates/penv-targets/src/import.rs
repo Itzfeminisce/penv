@@ -223,6 +223,7 @@ mod tests {
             detect: Vec::new(),
             types: BTreeMap::new(),
             options: toml::Table::new(),
+            knobs: Vec::new(),
             suggest: Vec::new(),
             layout: Vec::new(),
             check: None,

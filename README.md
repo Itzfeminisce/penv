@@ -92,6 +92,16 @@ The suggestions come from the directories that hold a `package.json`, a `pyproje
 
 `ts` reads through one accessor, `process.env` by default and `import.meta.env` or `Deno.env.get` when a `vite.config.*` or a `deno.json` sits beside it. penv never edits your `tsconfig.json`: it prints the import line to paste, following `extends` and using an alias from your `paths` map when one already reaches the file.
 
+Each target takes a few options, and `penv gen <target> --options` prints them with what they are set to now:
+
+| Target | Option | Values (default in bold) | Changes |
+|---|---|---|---|
+| `ts` | `key_case` | **`upper`**, `camel` | Property names in the exported object: the environment key, or its camel form. |
+| `ts` | `runtime` | **`node`**, `vite`, `deno` | The accessor every key is read through: `process.env`, `import.meta.env` or `Deno.env.get`. |
+| `py` | `pydantic` | **`false`**, `true` | Pydantic types for urls and secrets; off keeps the output on the standard library. |
+
+They live in the `[options]` table of `.penv/targets/<name>/target.toml`, the file penv wrote when it remembered where your file goes, each under a comment saying what it changes. Edit a value there and the next `penv gen` uses it.
+
 A language target is a folder holding a `target.toml` and a template. Drop one into `.penv/targets/go/` and `penv gen go` works; a folder holding only a `target.toml` inherits the rest. The binary knows no language by name.
 
 ## Coding agents
@@ -114,7 +124,7 @@ The claim penv makes, printed by `penv guard --check`, is only what is true: it 
 | `run -- cmd` | Validate, inject, mask |
 | `check [KEY]` | Schema, values, drift, guard coverage |
 | `ls` | Names and types, values masked |
-| `gen <target> [--out PATH] [--check]` | Typed file for a language |
+| `gen <target> [--out PATH] [--check] [--options]` | Typed file for a language |
 | `guard` | Harness configs from the schema |
 | `push` / `pull` | Values to and from the cloud |
 | `set` / `unset` | Write a value, never echoed |

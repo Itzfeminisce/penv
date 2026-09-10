@@ -113,6 +113,7 @@ set edit:completion:arg-completer[penv] = {|@words|
         if (eq $command 'penv;gen') {
             cand '--out' 'Write here instead, relative to the repository root'
             cand '--check' 'Compare with what is on disk instead of writing'
+            cand '--options' 'Show what this target''s options change instead of writing'
             cand '--json' 'Emit JSON on stdout, whatever stdout is attached to'
             cand '--format' 'Pick the output format: json or text'
             cand '--agent' 'Treat this session as an agent: JSON out, values masked'

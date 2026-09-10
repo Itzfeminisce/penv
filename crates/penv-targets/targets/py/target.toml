@@ -4,9 +4,13 @@ detect = ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"]
 import = "from {module} import env"
 
 [options]
-# Pydantic types for urls and secrets; off leaves the output on the standard
-# library alone.
 pydantic = false
+
+[[option]]
+name = "pydantic"
+default = false
+values = [false, true]
+about = "Pydantic types for urls and secrets; off keeps the output on the standard library."
 
 [[suggest]]
 option = "pydantic"

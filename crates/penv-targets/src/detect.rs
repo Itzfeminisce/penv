@@ -220,6 +220,7 @@ mod tests {
             detect: detect.iter().map(|f| f.to_string()).collect(),
             types: BTreeMap::new(),
             options: toml::Table::new(),
+            knobs: Vec::new(),
             suggest: Vec::new(),
             layout: Vec::new(),
             check: None,

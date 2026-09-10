@@ -149,6 +149,7 @@ Register-ArgumentCompleter -Native -CommandName 'penv', 'penv.exe' -ScriptBlock 
         'penv;gen' {
             [CompletionResult]::new('--out', '--out', [CompletionResultType]::ParameterValue, 'Write here instead, relative to the repository root')
             [CompletionResult]::new('--check', '--check', [CompletionResultType]::ParameterValue, 'Compare with what is on disk instead of writing')
+            [CompletionResult]::new('--options', '--options', [CompletionResultType]::ParameterValue, 'Show what this target''s options change instead of writing')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterValue, 'Emit JSON on stdout, whatever stdout is attached to')
             [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterValue, 'Pick the output format: json or text')
             [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterValue, 'Treat this session as an agent: JSON out, values masked')

@@ -33,6 +33,36 @@ pub struct Check {
     pub files: BTreeMap<String, String>,
 }
 
+/// One `[[option]]` block: what an `[options]` knob changes, the values it
+/// takes, and what it is when nobody says. `[options]` holds the values; this
+/// says what they mean, so `gen --options` and the remembered override can.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Knob {
+    pub name: String,
+    pub default: toml::Value,
+    /// The values this knob takes; empty means free text.
+    #[serde(default)]
+    pub values: Vec<toml::Value>,
+    /// One line of plain English saying what the knob changes.
+    pub about: String,
+}
+
+impl Knob {
+    /// The values as the prompts, the table and the override write them.
+    pub fn words(&self) -> Vec<String> {
+        self.values.iter().map(word).collect()
+    }
+}
+
+/// One option value as a word: a string is its own, anything else is its TOML.
+pub fn word(value: &toml::Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string())
+}
+
 /// One `[options]` knob a folder asks penv to work out from the chosen package.
 /// Its entry in `[options]` is the default, and the answer penv takes silently.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -97,6 +127,8 @@ pub struct Target {
     /// Whatever `[options]` holds, reaching the template as `options`. The
     /// folder names its own knobs; no entry has meaning in Rust.
     pub options: toml::Table,
+    /// The `[[option]]` blocks describing those knobs, one per `[options]` key.
+    pub knobs: Vec<Knob>,
     pub suggest: Vec<Suggest>,
     pub layout: Vec<Layout>,
     pub check: Option<Check>,
@@ -112,6 +144,17 @@ pub struct Target {
     pub dir: String,
 }
 
+impl Target {
+    /// Every knob at the value in effect: what `[options]` holds, or the
+    /// `[[option]]` default when nothing set it.
+    pub fn effective(&self) -> Vec<(&Knob, &toml::Value)> {
+        self.knobs
+            .iter()
+            .map(|knob| (knob, self.options.get(&knob.name).unwrap_or(&knob.default)))
+            .collect()
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
@@ -123,6 +166,8 @@ struct File {
     types: BTreeMap<String, String>,
     #[serde(default)]
     options: toml::Table,
+    #[serde(default)]
+    option: Vec<Knob>,
     #[serde(default)]
     suggest: Vec<Suggest>,
     #[serde(default)]
@@ -179,6 +224,26 @@ pub fn parse(
             message: "[check] has an empty command".into(),
         });
     }
+    for knob in &file.option {
+        if !knob.values.is_empty() && !knob.values.contains(&knob.default) {
+            return Err(Error::Malformed {
+                dir: dir.to_string(),
+                message: format!(
+                    "[[option]] {} defaults to {}, which is not one of its values",
+                    knob.name,
+                    word(&knob.default)
+                ),
+            });
+        }
+    }
+    for key in file.options.keys() {
+        if !file.option.iter().any(|knob| &knob.name == key) {
+            return Err(Error::Malformed {
+                dir: dir.to_string(),
+                message: format!("[options] {key} has no [[option]] block saying what it changes"),
+            });
+        }
+    }
     for suggest in &file.suggest {
         if !file.options.contains_key(&suggest.option) {
             return Err(Error::Malformed {
@@ -217,6 +282,7 @@ pub fn parse(
         detect: file.detect,
         types: file.types,
         options: file.options,
+        knobs: file.option,
         suggest: file.suggest,
         layout: file.layout,
         check: file.check,
@@ -242,6 +308,30 @@ url = "string"
 email = "string"
 port = "number"
 enum = "values | join(' | ')"
+"#;
+
+    const KEY_CASE: &str = r#"
+[[option]]
+name = "key_case"
+default = "upper"
+values = ["upper", "camel"]
+about = "Property names in the exported object."
+"#;
+
+    const RUNTIME: &str = r#"
+[[option]]
+name = "runtime"
+default = "node"
+values = ["node", "vite", "deno"]
+about = "Where the values are read from at run time."
+"#;
+
+    const PYDANTIC: &str = r#"
+[[option]]
+name = "pydantic"
+default = false
+values = [false, true]
+about = "Pydantic types for urls and secrets."
 "#;
 
     fn config(head: &str) -> toml::Table {
@@ -333,17 +423,73 @@ enum = "values | join(' | ')"
     fn the_options_table_is_whatever_the_folder_puts_there() {
         let target = read(
             "ts",
-            "name = \"ts\"\noutput = \"src/env.ts\"\n[options]\nkey_case = \"camel\"\n",
+            &format!("name = \"ts\"\noutput = \"src/env.ts\"\n[options]\nkey_case = \"camel\"\n{KEY_CASE}"),
         )
         .unwrap();
         assert_eq!(target.options["key_case"].as_str(), Some("camel"));
     }
 
     #[test]
+    fn every_knob_says_what_it_changes_and_what_it_takes() {
+        let target = read(
+            "ts",
+            &format!("name = \"ts\"\noutput = \"src/env.ts\"\n[options]\nkey_case = \"camel\"\n{KEY_CASE}"),
+        )
+        .unwrap();
+        let knob = &target.knobs[0];
+        assert_eq!(knob.words(), ["upper", "camel"]);
+        assert!(knob.about.starts_with("Property names"));
+        assert_eq!(
+            target.effective()[0].1.as_str(),
+            Some("camel"),
+            "[options] holds the value in effect, [[option]] the default"
+        );
+    }
+
+    #[test]
+    fn a_knob_with_no_value_of_its_own_reads_its_default() {
+        let target = read("ts", &format!("name = \"ts\"\noutput = \"a\"\n{KEY_CASE}")).unwrap();
+        assert_eq!(target.effective()[0].1.as_str(), Some("upper"));
+    }
+
+    #[test]
+    fn a_knob_whose_default_is_not_one_of_its_values_is_a_broken_folder() {
+        let error = read(
+            "ts",
+            "name = \"ts\"\noutput = \"a\"\n[[option]]\nname = \"key_case\"\ndefault = \"snake\"\nvalues = [\"upper\", \"camel\"]\nabout = \"Property names.\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("not one of its values"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_option_nothing_describes_is_a_knob_nobody_can_find() {
+        let error = read(
+            "ts",
+            "name = \"ts\"\noutput = \"a\"\n[options]\nkey_case = \"camel\"\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no [[option]] block"), "{error}");
+    }
+
+    #[test]
+    fn a_knob_with_no_values_listed_takes_free_text() {
+        let target = read(
+            "ts",
+            "name = \"ts\"\noutput = \"a\"\n[options]\nheader = \"// generated\"\n[[option]]\nname = \"header\"\ndefault = \"\"\nabout = \"The line written above the file.\"\n",
+        )
+        .unwrap();
+        assert!(target.knobs[0].words().is_empty());
+    }
+
+    #[test]
     fn a_rule_carries_the_value_it_sets_and_the_prompt_reads_the_default_first() {
         let target = read(
             "ts",
-            "name = \"ts\"\noutput = \"a\"\n[options]\npydantic = false\n[[suggest]]\noption = \"pydantic\"\nprompt = \"use pydantic types?\"\n[[suggest.rule]]\nvalue = true\nfiles = [\"pyproject.toml\"]\ncontains = \"pydantic\"\n",
+            &format!("name = \"ts\"\noutput = \"a\"\n[options]\npydantic = false\n{PYDANTIC}[[suggest]]\noption = \"pydantic\"\nprompt = \"use pydantic types?\"\n[[suggest.rule]]\nvalue = true\nfiles = [\"pyproject.toml\"]\ncontains = \"pydantic\"\n"),
         )
         .unwrap();
         let suggest = &target.suggest[0];
@@ -369,7 +515,7 @@ enum = "values | join(' | ')"
     fn a_rule_sets_any_value_it_likes_because_there_is_no_list_to_be_in() {
         let target = read(
             "ts",
-            "name = \"ts\"\noutput = \"a\"\n[options]\nruntime = \"node\"\n[[suggest]]\noption = \"runtime\"\nprompt = \"which?\"\n[[suggest.rule]]\nvalue = \"bun\"\nfiles = [\"bunfig.toml\"]\n",
+            &format!("name = \"ts\"\noutput = \"a\"\n[options]\nruntime = \"node\"\n{RUNTIME}[[suggest]]\noption = \"runtime\"\nprompt = \"which?\"\n[[suggest.rule]]\nvalue = \"bun\"\nfiles = [\"bunfig.toml\"]\n"),
         )
         .unwrap();
         assert_eq!(
@@ -385,7 +531,7 @@ enum = "values | join(' | ')"
     fn a_rule_that_names_nothing_to_look_at_is_a_broken_folder() {
         let error = read(
             "ts",
-            "name = \"ts\"\noutput = \"a\"\n[options]\nruntime = \"node\"\n[[suggest]]\noption = \"runtime\"\nprompt = \"which?\"\n[[suggest.rule]]\nvalue = \"vite\"\n",
+            &format!("name = \"ts\"\noutput = \"a\"\n[options]\nruntime = \"node\"\n{RUNTIME}[[suggest]]\noption = \"runtime\"\nprompt = \"which?\"\n[[suggest.rule]]\nvalue = \"vite\"\n"),
         )
         .unwrap_err();
         assert!(

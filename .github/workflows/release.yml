@@ -123,7 +123,22 @@ jobs:
         with:
           draft: true
           files: sums/*.sig
-      # The signatures are up, so the release becomes one people can download.
+      # The command manifest is the release asset the docs generator, the completions and the agent
+      # skill read, so it is emitted by the binary this release ships rather than described anywhere.
+      - name: The command manifest this release speaks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "$GITHUB_REF_NAME" \
+            --pattern "penv-${GITHUB_REF_NAME}-x86_64-unknown-linux-musl" --output penv
+          chmod +x penv
+          ./penv help --json > manifest.json
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: manifest.json
+      # The signatures and the manifest are up, so the release becomes one people can download.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}

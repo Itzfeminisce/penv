@@ -173,6 +173,7 @@ mod tests {
             detect: vec![],
             types,
             options: toml::Table::new(),
+            knobs: Vec::new(),
             suggest: Vec::new(),
             layout: Vec::new(),
             check: None,

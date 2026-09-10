@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use penv_schema::Schema;
-use penv_targets::{Config, OptionValue, Roots, Source, Suggest, Target};
+use penv_targets::{Config, Knob, OptionValue, Roots, Source, Suggest, Target, word};
 use serde_json::{Value, json};
 
 use crate::commands::load_schema;
@@ -12,13 +12,21 @@ use crate::files::{Disk, home, on_path, read_file, show, write_file_making_paren
 use crate::output::{Output, Report, Style, table};
 use crate::prompt;
 
+/// What one run of `gen` does; the flags that pick it cannot both be passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Write,
+    Check,
+    Options,
+}
+
 /// Write the typed file for one target, or list the targets there are.
 pub fn run(
     out: &Output,
     cwd: &Path,
     name: Option<&str>,
     to: Option<&Path>,
-    check: bool,
+    mode: Mode,
     env: &Env,
     agent_flag: bool,
 ) -> Result<Report, CliError> {
@@ -30,6 +38,10 @@ pub fn run(
         return Ok(list(out, &dir, &roots));
     };
     let target = penv_targets::load(&Disk, &roots, name).map_err(refused)?;
+    if mode == Mode::Options {
+        return Ok(knobs(out, &target));
+    }
+    let check = mode == Mode::Check;
     let explicit = to.map(|path| inside(&dir, path)).transpose()?;
     let style = out.style();
 
@@ -75,6 +87,8 @@ struct Written {
     /// The repo override that now remembers this path.
     remembered: Option<PathBuf>,
     note: Option<String>,
+    /// The knobs in effect and the file that holds them.
+    settings: Option<String>,
     import: Option<String>,
 }
 
@@ -217,11 +231,9 @@ fn refused(error: penv_targets::Error) -> CliError {
 struct Settled {
     /// Relative to the repository root, in forward slashes.
     path: String,
-    /// Options this run worked out, to remember beside the path. An option the
-    /// target already defaults to is not one of them.
+    /// Options this run worked out. An option the target already defaults to is
+    /// not one of them; the override still writes the whole table back.
     options: Vec<(String, OptionValue)>,
-    /// False when the repository already remembered all of this.
-    fresh: bool,
 }
 
 enum Outcome {
@@ -244,7 +256,6 @@ fn settle(
         return Ok(Outcome::Chosen(Settled {
             path: target.output.clone(),
             options: Vec::new(),
-            fresh: false,
         }));
     }
 
@@ -266,11 +277,7 @@ fn settle(
             options.push((suggest.option.clone(), chosen));
         }
     }
-    Ok(Outcome::Chosen(Settled {
-        path,
-        options,
-        fresh: true,
-    }))
+    Ok(Outcome::Chosen(Settled { path, options }))
 }
 
 /// One path per directory holding a detect file, shallowest first and shaped by
@@ -348,14 +355,6 @@ fn ask_option(
     );
     let answer = prompt::read_line(&prompt)?;
     Ok(Some(parse_choice(&answer, &found, &offered)?))
-}
-
-/// One option value as the prompt writes it: a string is its own word.
-fn word(value: &OptionValue) -> String {
-    value
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| value.to_string())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -492,46 +491,54 @@ fn put(
         .as_ref()
         .map(|file| configs(dir, &package, file))
         .unwrap_or_default();
-    let remembered = if settled.fresh {
-        remember(dir, target, settled)?
-    } else {
-        None
-    };
-    let note = remembered.as_ref().map(|(_, kept)| {
+    let kept = format!(".penv/targets/{}/target.toml", target.name);
+    let remembered = remember(dir, target, &settled.path, &kept)?;
+    let note = remembered.as_ref().map(|_| {
         format!(
             "remembered {} in {}",
             show(Path::new(&settled.path)),
-            show(Path::new(kept))
+            show(Path::new(&kept))
+        )
+    });
+    // The knobs are named after every write, so the file that holds them is
+    // learned on first use rather than read about somewhere else.
+    let settings = (!target.knobs.is_empty() && dir.join(&kept).is_file()).then(|| {
+        format!(
+            "options in {}: {}",
+            show(Path::new(&kept)),
+            settings_of(target)
         )
     });
 
     Ok(Written {
         path,
         changed: !unchanged,
-        remembered: remembered.map(|(path, _)| path),
+        remembered,
         note,
+        settings,
         import: penv_targets::import_line(target, &package, &settled.path, &configs),
     })
 }
 
-/// The answer is kept as the smallest override that says it, even when it is the
-/// built-in default, because it was answered and is never asked again.
+/// The answer is kept as the override that says it, even when it is the built-in
+/// default, because it was answered and is never asked again. A folder penv did
+/// not write is left exactly as it is.
 fn remember(
     dir: &Path,
     target: &Target,
-    settled: &Settled,
-) -> Result<Option<(PathBuf, String)>, CliError> {
-    let kept = format!(".penv/targets/{}/target.toml", target.name);
-    let path = dir.join(&kept);
-    let body = penv_targets::override_body(&target.name, &settled.path, &settled.options);
-    let knobs: Vec<String> = target.suggest.iter().map(|s| s.option.clone()).collect();
+    output: &str,
+    kept: &str,
+) -> Result<Option<PathBuf>, CliError> {
+    let path = dir.join(kept);
+    let body = penv_targets::override_body(&target.name, output, &target.effective());
+    let names: Vec<String> = target.knobs.iter().map(|knob| knob.name.clone()).collect();
     match read_file(&path) {
         Ok(existing) if existing == body => return Ok(None),
-        Ok(existing) if penv_targets::hand_written(&existing, &knobs) => return Ok(None),
+        Ok(existing) if penv_targets::hand_written(&existing, &names) => return Ok(None),
         _ => {}
     }
     write_file_making_parents(&path, &body)?;
-    Ok(Some((path, kept)))
+    Ok(Some(path))
 }
 
 /// The package's own `paths_from` file and every relative `extends` above it,
@@ -559,6 +566,9 @@ fn notes(written: &Written, style: &Style) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(note) = &written.note {
         lines.push(style.dim(note));
+    }
+    if let Some(settings) = &written.settings {
+        lines.push(style.dim(settings));
     }
     if let Some(import) = &written.import {
         lines.push(style.dim(import));
@@ -589,6 +599,92 @@ fn report(out: &Output, target: &Target, written: &Written) -> Report {
     )
 }
 
+/// Every knob one target takes, what it is set to now, and what it changes.
+fn knobs(out: &Output, target: &Target) -> Report {
+    let style = out.style();
+    let rows: Vec<Vec<String>> = target
+        .effective()
+        .iter()
+        .map(|(knob, value)| {
+            vec![
+                knob.name.clone(),
+                word(value),
+                word(&knob.default),
+                values_of(knob),
+                knob.about.clone(),
+            ]
+        })
+        .collect();
+    let kept = format!(".penv/targets/{}/target.toml", target.name);
+    let text = if rows.is_empty() {
+        style.dim(&format!("the {} target takes no options", target.name))
+    } else {
+        format!(
+            "{}\n\n{}",
+            table(
+                &["NAME", "VALUE", "DEFAULT", "VALUES", "ABOUT"],
+                &rows,
+                &style
+            ),
+            style.dim(&format!("set them in {}", show(Path::new(&kept))))
+        )
+    };
+
+    Report::new(
+        json!({
+            "target": target.name,
+            "source": target.source.as_str(),
+            "remembered": show(Path::new(&kept)),
+            "options": described_options(target),
+        }),
+        text,
+    )
+}
+
+/// The knobs as JSON, the same shape wherever penv publishes them.
+fn described_options(target: &Target) -> Vec<Value> {
+    target
+        .effective()
+        .iter()
+        .map(|(knob, value)| {
+            json!({
+                "name": knob.name,
+                "value": as_json(value),
+                "default": as_json(&knob.default),
+                "values": knob.values.iter().map(as_json).collect::<Vec<_>>(),
+                "about": knob.about,
+            })
+        })
+        .collect()
+}
+
+fn as_json(value: &OptionValue) -> Value {
+    serde_json::to_value(value).unwrap_or(Value::Null)
+}
+
+/// The values a knob takes, or a dash when it takes free text.
+fn values_of(knob: &Knob) -> String {
+    if knob.values.is_empty() {
+        "-".to_string()
+    } else {
+        knob.words().join("|")
+    }
+}
+
+/// The knobs in effect on one line, as the listing shows them.
+fn settings_of(target: &Target) -> String {
+    let pairs: Vec<String> = target
+        .effective()
+        .iter()
+        .map(|(knob, value)| format!("{}={}", knob.name, word(value)))
+        .collect();
+    if pairs.is_empty() {
+        "-".to_string()
+    } else {
+        pairs.join(" ")
+    }
+}
+
 fn list(out: &Output, dir: &Path, roots: &Roots) -> Report {
     let found = penv_targets::available(&Disk, roots);
     let mut rows: Vec<Vec<String>> = Vec::new();
@@ -600,6 +696,7 @@ fn list(out: &Output, dir: &Path, roots: &Roots) -> Report {
                     "-".to_string(),
                     "broken".to_string(),
                     "-".to_string(),
+                    "-".to_string(),
                     described(error),
                 ]);
                 listed.push(json!({ "status": "broken", "reason": described(error) }));
@@ -610,6 +707,7 @@ fn list(out: &Output, dir: &Path, roots: &Roots) -> Report {
                     target.name.clone(),
                     target.source.as_str().to_string(),
                     target.output.clone(),
+                    settings_of(target),
                     if packages.is_empty() {
                         "-".to_string()
                     } else {
@@ -627,6 +725,7 @@ fn list(out: &Output, dir: &Path, roots: &Roots) -> Report {
                     "dir": target.dir,
                     "output": target.output,
                     "detect": target.detect,
+                    "options": described_options(target),
                     "candidates": packages,
                     "detected": !packages.is_empty(),
                 }));
@@ -637,8 +736,12 @@ fn list(out: &Output, dir: &Path, roots: &Roots) -> Report {
     let style = out.style();
     let text = format!(
         "{}\n\n{}",
-        table(&["NAME", "SOURCE", "OUTPUT", "PACKAGES"], &rows, &style),
-        style.dim("penv gen <name> writes one of these")
+        table(
+            &["NAME", "SOURCE", "OUTPUT", "OPTIONS", "PACKAGES"],
+            &rows,
+            &style
+        ),
+        style.dim("penv gen <name> writes one of these; penv gen <name> --options says what the options change")
     );
 
     Report::new(
@@ -928,7 +1031,7 @@ mod tests {
             Outcome::Skipped(reason) => panic!("{reason}"),
         };
         assert_eq!(settled.path, "apps/web/src/env.ts");
-        assert!(!settled.fresh, "it was remembered already");
+        assert!(settled.options.is_empty(), "nothing new was answered");
     }
 
     #[test]
@@ -950,7 +1053,6 @@ mod tests {
             Outcome::Skipped(reason) => panic!("{reason}"),
         };
         assert_eq!(settled.path, "lib/env.ts");
-        assert!(settled.fresh);
     }
 
     #[test]

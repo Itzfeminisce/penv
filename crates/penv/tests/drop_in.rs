@@ -261,10 +261,14 @@ fn a_repository_of_two_packages_is_told_where_to_write_and_remembers_it() {
     assert_eq!(
         std::fs::read_to_string(workspace.path(".penv/targets/ts/target.toml"))
             .expect("remembered"),
-        "name = \"ts\"\noutput = \"apps/web/src/env.ts\"\n"
+        "name = \"ts\"\noutput = \"apps/web/src/env.ts\"\n\n[options]\n\
+         # penv: Property names in the exported object: the environment key, or its camel form. (upper|camel)\n\
+         key_case = \"upper\"\n\
+         # penv: The accessor every key is read through: process.env, import.meta.env or Deno.env.get. (node|vite|deno)\n\
+         runtime = \"node\"\n"
     );
 
-    // The override carries an output and nothing else, so the target still
+    // The override carries the answers and nothing else, so the target still
     // renders through the built-in template and is never asked about again.
     std::fs::remove_file(workspace.path("apps/web/src/env.ts")).expect("the generated file");
     let again = json(&workspace.penv(&["--json", "gen", "ts"]));
@@ -348,7 +352,9 @@ fn a_python_package_needs_nothing_but_a_requirements_file_to_be_offered() {
     assert_eq!(
         std::fs::read_to_string(workspace.path(".penv/targets/py/target.toml"))
             .expect("remembered"),
-        "name = \"py\"\noutput = \"service/penv_env.py\"\n"
+        "name = \"py\"\noutput = \"service/penv_env.py\"\n\n[options]\n\
+         # penv: Pydantic types for urls and secrets; off keeps the output on the standard library. (false|true)\n\
+         pydantic = false\n"
     );
 }
 
@@ -368,10 +374,20 @@ fn a_vite_package_reads_import_meta_and_the_choice_is_remembered() {
         "{written}\n{source}"
     );
     assert!(!source.contains("process.env"), "{source}");
+    let remembered = std::fs::read_to_string(workspace.path(".penv/targets/ts/target.toml"))
+        .expect("remembered");
     assert_eq!(
-        std::fs::read_to_string(workspace.path(".penv/targets/ts/target.toml"))
-            .expect("remembered"),
-        "name = \"ts\"\noutput = \"apps/web/src/env.ts\"\n\n[options]\nruntime = \"vite\"\n"
+        remembered,
+        "name = \"ts\"\noutput = \"apps/web/src/env.ts\"\n\n[options]\n\
+         # penv: Property names in the exported object: the environment key, or its camel form. (upper|camel)\n\
+         key_case = \"upper\"\n\
+         # penv: The accessor every key is read through: process.env, import.meta.env or Deno.env.get. (node|vite|deno)\n\
+         runtime = \"vite\"\n"
+    );
+    let again = stdout(&workspace.penv(&["--format", "text", "gen", "ts"]));
+    assert!(
+        again.contains("options in") && again.contains("runtime=vite"),
+        "a write names the file its options live in: {again}"
     );
 
     // The toolchain is this machine's business; the check says which it looked
@@ -386,6 +402,75 @@ fn a_vite_package_reads_import_meta_and_the_choice_is_remembered() {
     assert!(
         compiled["detail"].as_str().is_some_and(|d| !d.is_empty()),
         "a skip has to say why: {report}"
+    );
+}
+
+#[test]
+fn the_options_a_target_takes_are_findable_and_an_edited_one_is_kept() {
+    let workspace = Workspace::new(&[
+        (".env", "PORT=3000\n"),
+        ("package.json", "{}"),
+        ("tsconfig.json", "{}"),
+    ]);
+    workspace.penv(&["--json", "init", "--no-guards"]);
+    workspace.penv(&["--json", "gen", "ts", "--out", "src/env.ts"]);
+
+    let listed = json(&workspace.penv(&["--json", "gen"]));
+    let ts = listed["targets"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .find(|t| t["name"] == "ts")
+        .expect("a ts row")
+        .clone();
+    let key_case = ts["options"]
+        .as_array()
+        .expect("options")
+        .iter()
+        .find(|o| o["name"] == "key_case")
+        .expect("the key_case knob")
+        .clone();
+    assert_eq!(key_case["value"], "upper");
+    assert_eq!(key_case["default"], "upper");
+    assert_eq!(key_case["values"], serde_json::json!(["upper", "camel"]));
+    assert!(
+        key_case["about"].as_str().is_some_and(|a| !a.is_empty()),
+        "a knob nobody can read about is one nobody can find: {key_case}"
+    );
+    assert!(
+        stdout(&workspace.penv(&["--format", "text", "gen"])).contains("key_case=upper"),
+        "the listing says what is in effect"
+    );
+
+    let table = stdout(&workspace.penv(&["--format", "text", "gen", "ts", "--options"]));
+    for expected in [
+        "NAME",
+        "VALUE",
+        "DEFAULT",
+        "VALUES",
+        "ABOUT",
+        "node|vite|deno",
+    ] {
+        assert!(table.contains(expected), "{expected} is missing: {table}");
+    }
+
+    // The remembered file is the one place the answers live, so an edit there is
+    // what the next run renders through.
+    let kept = workspace.path(".penv/targets/ts/target.toml");
+    let edited = std::fs::read_to_string(&kept)
+        .expect("remembered")
+        .replace("key_case = \"upper\"", "key_case = \"camel\"");
+    std::fs::write(&kept, &edited).expect("the edit lands");
+    workspace.penv(&["--json", "gen", "ts"]);
+    let source = std::fs::read_to_string(workspace.path("src/env.ts")).expect("the file");
+    assert!(
+        source.contains("port:") && !source.contains("PORT:"),
+        "the edited key_case is what rendered: {source}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&kept).expect("remembered"),
+        edited,
+        "penv rewrites its own file with the answer that is in it"
     );
 }
 

@@ -112,12 +112,17 @@ pub fn dispatch(cli: &Cli, out: &Output, cwd: &Path, env: &Env) -> Result<Report
             target,
             out: to,
             check,
+            options,
         }) => r#gen::run(
             out,
             cwd,
             target.as_deref(),
             to.as_deref(),
-            *check,
+            match (*options, *check) {
+                (true, _) => r#gen::Mode::Options,
+                (_, true) => r#gen::Mode::Check,
+                _ => r#gen::Mode::Write,
+            },
             env,
             cli.agent,
         ),
